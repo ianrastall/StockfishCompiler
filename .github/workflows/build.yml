@@ -1,49 +1,36 @@
-name: Build Stockfish
+name: Build .NET Application
 
 on:
   push:
-    branches: [ "main", "master" ]
-  pull_request:
     branches: [ "main", "master" ]
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # "windows-latest" is safer if this is a WPF or Windows Forms app
+    runs-on: windows-latest
 
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      - name: Install Build Tools
-        run: sudo apt-get update && sudo apt-get install -y make g++
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x' # Change to 6.0 or 7.0 if you use an older version
 
-      - name: Compile Stockfish
-        # CHANGED: Removed the word 'build'. 
-        # It now just says "Make this using the x86-64 architecture"
-        run: make -j $(nproc) ARCH=x86-64
+      - name: Restore Dependencies
+        run: dotnet restore
 
-      - name: Upload Build Artifact
+      - name: Build
+        run: dotnet build --configuration Release --no-restore
+
+      - name: Publish (Create Executable)
+        run: dotnet publish --configuration Release --no-build --output ./publish_output
+
+      - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: stockfish-executable
-          path: stockfish
+          name: StockfishCompiler-App
+          path: ./publish_output
           if-no-files-found: error
-
-  release:
-    needs: build
-    runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/')
-    
-    steps:
-      - name: Download Artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: stockfish-executable
-
-      - name: Create Release
-        uses: softprops/action-gh-release@v2
-        with:
-          files: stockfish
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
