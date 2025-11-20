@@ -1,4 +1,4 @@
-# StockfishCompiler
+# Stockfish Compiler
 
 A WPF application for compiling Stockfish chess engine with automatic CPU architecture detection.
 
@@ -47,27 +47,6 @@ A WPF application for compiling Stockfish chess engine with automatic CPU archit
    - Click "Start Build" to begin compilation
    - View real-time build output
    - Cancel build if needed
-
-## Troubleshooting
-
-### Application won't start
-
-Check logs at: `%LOCALAPPDATA%\StockfishCompiler\logs\`
-
-Or run `OpenLogs.bat` (included in release) to open the logs folder.
-
-### No compilers found
-
-Make sure MSYS2 is installed and MinGW-w64 toolchain is installed:
-```bash
-pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-make
-```
-
-### Build fails
-
-- Ensure `make` is available in MSYS2 (`C:\msys64\usr\bin\make.exe`)
-- Check that compiler path is correct in Compiler Setup tab
-- Review build output in Compilation tab for specific errors
 
 ## Logs
 
