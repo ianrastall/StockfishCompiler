@@ -1,0 +1,375 @@
+using System.IO;
+using System.IO.Compression;
+using System.Net.Http;
+using System.Runtime.InteropServices;
+using System.Security.Cryptography;
+using System.Text.Json;
+using System.Text.RegularExpressions;
+using StockfishCompiler.Models;
+
+namespace StockfishCompiler.Services;
+
+public class StockfishDownloader : IStockfishDownloader
+{
+    private readonly HttpClient _httpClient;
+    private const string GitHubApiUrl = "https://api.github.com/repos/official-stockfish/Stockfish/releases/latest";
+    private const string MasterZipUrl = "https://github.com/official-stockfish/Stockfish/archive/refs/heads/master.zip";
+    private static readonly string[] NetworkMirrors =
+    [
+        "https://tests.stockfishchess.org/api/nn/{0}",
+        "https://github.com/official-stockfish/networks/raw/master/{0}"
+    ];
+    private static readonly Regex NetworkMacroRegex = new("#define\\s+EvalFileDefaultName\\w*\\s+\"(nn-[a-z0-9]{12}\\.nnue)\"", RegexOptions.IgnoreCase | RegexOptions.Compiled, TimeSpan.FromSeconds(1));
+    private static readonly Regex NetworkFileNameRegex = new("nn-([a-f0-9]{12})\\.nnue", RegexOptions.IgnoreCase | RegexOptions.Compiled, TimeSpan.FromSeconds(1));
+    private const long MaxDownloadSize = 500L * 1024 * 1024; // 500 MB safety cap
+
+    public StockfishDownloader(HttpClient httpClient)
+    {
+        _httpClient = httpClient;
+        EnsureUserAgent();
+    }
+
+    public async Task<ReleaseInfo?> GetLatestReleaseAsync()
+    {
+        try
+        {
+            EnsureUserAgent();
+            using var response = await _httpClient.GetAsync(GitHubApiUrl, HttpCompletionOption.ResponseHeadersRead);
+            response.EnsureSuccessStatusCode();
+            using var stream = await response.Content.ReadAsStreamAsync();
+            using var doc = await JsonDocument.ParseAsync(stream);
+            var root = doc.RootElement;
+            return new ReleaseInfo
+            {
+                Version = root.GetProperty("tag_name").GetString() ?? "unknown",
+                Url = root.GetProperty("zipball_url").GetString() ?? string.Empty,
+                Name = root.GetProperty("name").GetString() ?? "Latest Release"
+            };
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public async Task<SourceDownloadResult> DownloadSourceAsync(string version, IProgress<string>? progress = null)
+    {
+        progress?.Report($"Downloading Stockfish {version}...");
+
+        var tempDir = Path.Combine(Path.GetTempPath(), $"stockfish_build_{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDir);
+
+        var zipPath = Path.Combine(tempDir, "stockfish.zip");
+        var url = version == "master" ? MasterZipUrl : (await GetLatestReleaseAsync())?.Url ?? MasterZipUrl;
+
+        EnsureUserAgent();
+        await SafeDownloadToFileAsync(url, zipPath, progress);
+
+        progress?.Report("Extracting source code...");
+        SafeExtractToDirectory(zipPath, tempDir);
+
+        var extractedDirs = Directory.GetDirectories(tempDir).Where(d => d.Contains("Stockfish", StringComparison.OrdinalIgnoreCase)).ToArray();
+        if (extractedDirs.Length == 0)
+            throw new Exception("Could not find extracted Stockfish directory");
+
+        var rootDir = extractedDirs[0];
+        var sourceDir = Path.Combine(rootDir, "src");
+        if (!Directory.Exists(sourceDir))
+            throw new Exception($"Source directory not found: {sourceDir}");
+
+        progress?.Report($"Source extracted to: {sourceDir}");
+        return new SourceDownloadResult
+        {
+            SourceDirectory = sourceDir,
+            RootDirectory = rootDir,
+            TempDirectory = tempDir
+        };
+    }
+
+    public async Task<bool> DownloadNeuralNetworkAsync(string sourceDirectory, BuildConfiguration? config = null, IProgress<string>? progress = null)
+    {
+        progress?.Report("Preparing NNUE neural networks...");
+
+        var networkFiles = DetectNetworkFileNames(sourceDirectory);
+        if (networkFiles.Count == 0)
+        {
+            progress?.Report("Could not determine default network files - build will attempt to download them.");
+            return false;
+        }
+
+        var overallSuccess = true;
+
+        foreach (var networkFile in networkFiles)
+        {
+            var destination = Path.Combine(sourceDirectory, networkFile);
+            if (File.Exists(destination))
+            {
+                if (await ValidateNetworkFileAsync(destination, networkFile))
+                {
+                    progress?.Report($"{networkFile} already present and validated.");
+                    continue;
+                }
+
+                progress?.Report($"{networkFile} exists but failed validation - re-downloading.");
+            }
+
+            var downloaded = false;
+            foreach (var urlTemplate in NetworkMirrors)
+            {
+                var url = string.Format(urlTemplate, networkFile);
+                try
+                {
+                    progress?.Report($"Downloading {networkFile} from {url}...");
+                    EnsureUserAgent();
+                    
+                    var tempNetPath = destination + ".tmp";
+                    await SafeDownloadToFileAsync(url, tempNetPath, progress);
+
+                    if (!await ValidateNetworkFileAsync(tempNetPath, networkFile))
+                    {
+                        progress?.Report($"Downloaded {networkFile} from {url} failed validation.");
+                        File.Delete(tempNetPath);
+                        continue;
+                    }
+
+                    var sizeMb = new FileInfo(tempNetPath).Length / 1024d / 1024d;
+                    File.Move(tempNetPath, destination, true);
+                    progress?.Report($"Saved {networkFile} ({sizeMb:F1} MB).");
+                    downloaded = true;
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    progress?.Report($"Failed to download {networkFile} from {url} ({ex.Message}).");
+                }
+            }
+
+            if (!downloaded)
+            {
+                overallSuccess = false;
+                progress?.Report($"Unable to download {networkFile} - make will retry during build.");
+            }
+        }
+
+        return overallSuccess;
+    }
+
+    private async Task SafeDownloadToFileAsync(string url, string destinationPath, IProgress<string>? progress)
+    {
+        using var response = await _httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+        response.EnsureSuccessStatusCode();
+
+        var totalBytes = response.Content.Headers.ContentLength ?? -1L;
+        if (totalBytes > MaxDownloadSize)
+            throw new InvalidOperationException($"Download too large: {totalBytes} bytes");
+
+        using var stream = await response.Content.ReadAsStreamAsync();
+        using var fileStream = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None, 8192, true);
+
+        var buffer = new byte[8192];
+        long totalRead = 0;
+        int bytesRead;
+
+        while ((bytesRead = await stream.ReadAsync(buffer)) != 0)
+        {
+            await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead));
+            totalRead += bytesRead;
+
+            if (totalRead > MaxDownloadSize)
+                throw new InvalidOperationException("Download exceeded maximum size");
+        }
+    }
+
+    private static void SafeExtractToDirectory(string zipPath, string destinationDirectory)
+    {
+        using var archive = ZipFile.OpenRead(zipPath);
+        var destDirFullPath = Path.GetFullPath(destinationDirectory);
+
+        foreach (var entry in archive.Entries)
+        {
+            if (string.IsNullOrEmpty(entry.Name)) continue;
+
+            var completeFileName = Path.GetFullPath(Path.Combine(destDirFullPath, entry.FullName));
+
+            if (!completeFileName.StartsWith(destDirFullPath, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new IOException("Zip Slip vulnerability detected: Entry tries to write outside target directory.");
+            }
+
+            var directory = Path.GetDirectoryName(completeFileName);
+            if (!string.IsNullOrEmpty(directory))
+                Directory.CreateDirectory(directory);
+
+            entry.ExtractToFile(completeFileName, overwrite: true);
+        }
+    }
+
+    private static string FindMakeCommand(BuildConfiguration? config)
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return "make";
+
+        if (config?.SelectedCompiler?.Path != null)
+        {
+            var compilerPath = new DirectoryInfo(config.SelectedCompiler.Path);
+            var msys2Root = compilerPath.Parent?.Parent;
+            
+            if (msys2Root != null && msys2Root.Exists)
+            {
+                var makePaths = new[]
+                {
+                    Path.Combine(msys2Root.FullName, "usr", "bin", "make.exe"),
+                    Path.Combine(msys2Root.FullName, "mingw64", "bin", "make.exe"),
+                    Path.Combine(msys2Root.FullName, "mingw64", "bin", "mingw32-make.exe")
+                };
+
+                foreach (var makePath in makePaths)
+                {
+                    if (File.Exists(makePath))
+                        return makePath;
+                }
+            }
+        }
+
+        var commonMsys2Paths = new[]
+        {
+            @"C:\msys64",
+            @"C:\msys2",
+            @"D:\msys64",
+            @"D:\msys2"
+        };
+
+        foreach (var msys2Path in commonMsys2Paths)
+        {
+            var makePaths = new[]
+            {
+                Path.Combine(msys2Path, "usr", "bin", "make.exe"),
+                Path.Combine(msys2Path, "mingw64", "bin", "make.exe"),
+                Path.Combine(msys2Path, "mingw64", "bin", "mingw32-make.exe")
+            };
+
+            foreach (var makePath in makePaths)
+            {
+                if (File.Exists(makePath))
+                    return makePath;
+            }
+        }
+
+        return "make";
+    }
+
+    private static Dictionary<string, string> PrepareEnvironment(BuildConfiguration? config)
+    {
+        var env = new Dictionary<string, string>();
+        foreach (System.Collections.DictionaryEntry entry in Environment.GetEnvironmentVariables())
+        {
+            if (entry.Key != null && entry.Value != null)
+                env[entry.Key.ToString()!] = entry.Value.ToString()!;
+        }
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            var pathsToAdd = new List<string>();
+
+            if (config?.SelectedCompiler?.Path != null)
+            {
+                var compilerPath = new DirectoryInfo(config.SelectedCompiler.Path);
+                var msys2Root = compilerPath.Parent?.Parent;
+                
+                if (msys2Root != null && msys2Root.Exists)
+                {
+                    var usrBin = Path.Combine(msys2Root.FullName, "usr", "bin");
+                    var mingw64Bin = Path.Combine(msys2Root.FullName, "mingw64", "bin");
+                    
+                    if (Directory.Exists(usrBin))
+                        pathsToAdd.Add(usrBin);
+                    if (Directory.Exists(mingw64Bin))
+                        pathsToAdd.Add(mingw64Bin);
+                }
+            }
+            else
+            {
+                var commonMsys2Paths = new[]
+                {
+                    @"C:\msys64",
+                    @"C:\msys2",
+                    @"D:\msys64",
+                    @"D:\msys2"
+                };
+
+                foreach (var msys2Path in commonMsys2Paths)
+                {
+                    if (Directory.Exists(msys2Path))
+                    {
+                        var usrBin = Path.Combine(msys2Path, "usr", "bin");
+                        var mingw64Bin = Path.Combine(msys2Path, "mingw64", "bin");
+                        
+                        if (Directory.Exists(usrBin))
+                            pathsToAdd.Add(usrBin);
+                        if (Directory.Exists(mingw64Bin))
+                            pathsToAdd.Add(mingw64Bin);
+                            
+                        break;
+                    }
+                }
+            }
+
+            if (pathsToAdd.Count > 0)
+            {
+                var currentPath = env.GetValueOrDefault("PATH", string.Empty);
+                env["PATH"] = string.Join(";", pathsToAdd) + ";" + currentPath;
+            }
+        }
+
+        return env;
+    }
+
+    private static List<string> DetectNetworkFileNames(string sourceDirectory)
+    {
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var candidates = new[]
+        {
+            Path.Combine(sourceDirectory, "evaluate.h"),
+            Path.Combine(sourceDirectory, "nnue", "evaluate.h")
+        };
+
+        foreach (var candidate in candidates)
+        {
+            if (!File.Exists(candidate))
+                continue;
+
+            var contents = File.ReadAllText(candidate);
+            foreach (Match match in NetworkMacroRegex.Matches(contents))
+            {
+                if (match.Success)
+                    names.Add(match.Groups[1].Value);
+            }
+        }
+
+        return names.ToList();
+    }
+
+    private static async Task<bool> ValidateNetworkFileAsync(string filePath, string fileName)
+    {
+        var info = new FileInfo(filePath);
+        if (!info.Exists || info.Length < 1_000_000)
+            return false;
+
+        var match = NetworkFileNameRegex.Match(fileName);
+        if (!match.Success)
+            return true;
+
+        var expectedPrefix = match.Groups[1].Value.ToLowerInvariant();
+
+        using var sha256 = SHA256.Create();
+        await using var stream = File.OpenRead(filePath);
+        var hash = Convert.ToHexString(await sha256.ComputeHashAsync(stream)).ToLowerInvariant();
+        return hash.StartsWith(expectedPrefix, StringComparison.Ordinal);
+    }
+
+    private void EnsureUserAgent()
+    {
+        if (_httpClient.DefaultRequestHeaders.UserAgent.Count == 0)
+            _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("StockfishCompiler/1.0");
+    }
+}

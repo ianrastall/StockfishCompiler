@@ -1,0 +1,57 @@
+# Build outputs
+[Bb]in/
+[Oo]bj/
+[Ll]og/
+[Dd]ebug*/
+[Rr]elease*/
+x64/
+x86/
+
+# IDE caches and user settings
+.vs/
+.vscode/
+.idea/
+_ReSharper*/
+*.DotSettings.user
+*.sln.iml
+*.user
+*.userosscache
+*.suo
+*.sln.docstates
+*.rsuser
+*.csproj.user
+*.vcxproj.user
+*.ipch
+
+# NuGet and tooling artifacts
+packages/
+artifacts/
+project.lock.json
+project.fragment.lock.json
+*.nupkg
+*.snupkg
+
+# Compiled binaries and intermediates
+*.dll
+*.exe
+*.pdb
+*.obj
+*.cache
+*.tmp
+*.log
+*.tlog
+
+# Publish profiles
+**/Properties/PublishProfiles/
+*.pubxml
+*.publishproj
+app.publish/
+
+# OS noise
+Thumbs.db
+Desktop.ini
+
+# Local helper outputs and scratch files
+app-*.log
+full-context.txt
+claude-sonnet-response-deep-think-thoughts.txt

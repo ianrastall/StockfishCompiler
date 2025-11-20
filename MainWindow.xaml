@@ -1,0 +1,53 @@
+﻿<Window x:Class="StockfishCompiler.MainWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:views="clr-namespace:StockfishCompiler.Views"
+        mc:Ignorable="d"
+        Title="Stockfish Compiler" Height="750" Width="950" WindowStartupLocation="CenterScreen">
+
+    <Grid Background="{StaticResource SecondaryBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0" Background="{StaticResource PrimaryBrush}" Padding="20,15" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1">
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="Stockfish Compiler" FontSize="24" FontWeight="Bold" Foreground="{StaticResource TextPrimaryBrush}"/>
+                <TextBlock Text="v1.0" Margin="10,5,0,0" Foreground="{StaticResource TextSecondaryBrush}" VerticalAlignment="Bottom"/>
+            </StackPanel>
+        </Border>
+
+        <TabControl Grid.Row="1" Style="{StaticResource DarkTabControl}">
+            <TabItem Header="Compiler Setup" Style="{StaticResource DarkTabItem}">
+                <views:CompilerSelectionView/>
+            </TabItem>
+            <TabItem Header="Build Configuration" Style="{StaticResource DarkTabItem}">
+                <views:BuildConfigurationView/>
+            </TabItem>
+            <TabItem Header="Compilation" Style="{StaticResource DarkTabItem}">
+                <views:BuildProgressView/>
+            </TabItem>
+        </TabControl>
+
+        <StatusBar Grid.Row="2" Background="{StaticResource SecondaryBrush}">
+            <StatusBarItem>
+                <TextBlock Text="{Binding StatusMessage}"/>
+            </StatusBarItem>
+            <StatusBarItem HorizontalAlignment="Right">
+                <TextBlock Text="{Binding SystemInfo}"/>
+            </StatusBarItem>
+        </StatusBar>
+
+        <Border Grid.Row="3" Background="{StaticResource PrimaryBrush}" Padding="10,5" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,1,0,0">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
+                <TextBlock Text="Logs:" Foreground="{StaticResource TextSecondaryBrush}" Margin="0,0,5,0" VerticalAlignment="Center"/>
+                <Button Content="Open Log Folder" Click="OpenLogsFolder_Click" Style="{StaticResource DarkButton}" Padding="10,4" Margin="0"/>
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>

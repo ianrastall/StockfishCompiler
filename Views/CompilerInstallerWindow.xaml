@@ -1,0 +1,98 @@
+<Window x:Class="StockfishCompiler.Views.CompilerInstallerWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        mc:Ignorable="d"
+        Title="Install C++ Compiler" 
+        Height="400" 
+        Width="600"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize">
+
+    <Window.Resources>
+        <Style TargetType="Window">
+            <Setter Property="Background" Value="#1e1e1e"/>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="20">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+        </Grid.RowDefinitions>
+
+        <TextBlock Grid.Row="0" 
+                   Text="No C++ Compiler Found" 
+                   FontSize="24" 
+                   FontWeight="Bold" 
+                   Foreground="White"
+                   Margin="0,0,0,10"/>
+
+        <TextBlock Grid.Row="1" 
+                   TextWrapping="Wrap"
+                   Foreground="#cccccc"
+                   Margin="0,0,0,20">
+            <Run Text="To compile Stockfish, you need a C++ compiler. "/>
+            <Run Text="We can automatically install MSYS2 with GCC for you."/>
+            <LineBreak/>
+            <LineBreak/>
+            <Run Text="This will:"/>
+            <LineBreak/>
+            <Run Text="- Download and install MSYS2 (~100 MB)"/>
+            <LineBreak/>
+            <Run Text="- Install the MinGW-w64 GCC compiler"/>
+            <LineBreak/>
+            <Run Text="- Configure everything automatically"/>
+        </TextBlock>
+
+        <ScrollViewer Grid.Row="2" 
+                      VerticalScrollBarVisibility="Auto"
+                      Margin="0,0,0,20">
+            <TextBox x:Name="LogTextBox"
+                     IsReadOnly="True"
+                     Background="#2d2d30"
+                     Foreground="#cccccc"
+                     FontFamily="Consolas"
+                     BorderThickness="1"
+                     BorderBrush="#555555"
+                     Padding="10"
+                     TextWrapping="Wrap"/>
+        </ScrollViewer>
+
+        <Grid Grid.Row="3">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+
+            <ProgressBar x:Name="InstallProgress"
+                         Grid.Column="0"
+                         Height="25"
+                         Margin="0,0,10,0"
+                         Visibility="Collapsed"/>
+
+            <Button x:Name="InstallButton"
+                    Grid.Column="1"
+                    Content="Install Compiler"
+                    Width="120"
+                    Height="30"
+                    Margin="0,0,10,0"
+                    Background="#007ACC"
+                    Foreground="White"
+                    Click="InstallButton_Click"/>
+
+            <Button x:Name="CancelButton"
+                    Grid.Column="2"
+                    Content="Cancel"
+                    Width="80"
+                    Height="30"
+                    Background="#555555"
+                    Foreground="White"
+                    Click="CancelButton_Click"/>
+        </Grid>
+    </Grid>
+</Window>
