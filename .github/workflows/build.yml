@@ -19,15 +19,15 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y make g++
 
       - name: Compile Stockfish
-        # CHANGED: Removed 'cd src' to build from the repository root
-        run: make -j $(nproc) build ARCH=x86-64
+        # CHANGED: Removed the word 'build'. 
+        # It now just says "Make this using the x86-64 architecture"
+        run: make -j $(nproc) ARCH=x86-64
 
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
         with:
           name: stockfish-executable
-          # CHANGED: Updated path to look for the file in root, not src/
-          path: stockfish 
+          path: stockfish
           if-no-files-found: error
 
   release:
@@ -44,7 +44,6 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
-          # CHANGED: Updated path here as well
           files: stockfish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
