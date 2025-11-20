@@ -1,0 +1,1012 @@
+I've reviewed your Stockfish Compiler codebase thoroughly. Here are the problematic areas I've identified, organized by severity:
+
+## Critical Security Issues
+
+### 1. **Command Injection Vulnerabilities**
+**Location**: `BuildService.cs`, `StockfishDownloader.cs`
+
+**Problem**: User-controlled paths are passed directly to process execution without sanitization.
+
+```csharp
+// BuildService.cs - Line ~130
+var makeArgs = $"-j{config.ParallelJobs} profile-build ARCH={config.SelectedArchitecture?.Id ?? "x86-64"} COMP={GetCompType(config)}";
+```
+
+**Fix**: Validate and sanitize all inputs:
+
+```csharp
+private static string SanitizeArchitecture(string? arch)
+{
+    if (string.IsNullOrWhiteSpace(arch))
+        return "x86-64";
+    
+    // Whitelist valid architectures
+    var validArchs = new HashSet<string>
+    {
+        "x86-64", "x86-64-vnni512", "x86-64-vnni256", "x86-64-avx512",
+        "x86-64-bmi2", "x86-64-avx2", "x86-64-sse41-popcnt", "armv8", "apple-silicon"
+    };
+    
+    return validArchs.Contains(arch) ? arch : "x86-64";
+}
+
+private static int SanitizeParallelJobs(int jobs)
+{
+    return Math.Clamp(jobs, 1, Environment.ProcessorCount * 2);
+}
+```
+
+### 2. **Path Traversal Vulnerability**
+**Location**: `BuildService.CopyExecutable()`, `StockfishDownloader.DownloadSourceAsync()`
+
+**Problem**: User-provided output directory not validated.
+
+```csharp
+// BuildService.cs - Line ~194
+var outputPath = Path.Combine(config.OutputDirectory, outputName);
+File.Copy(sourceExe, outputPath, true);
+```
+
+**Fix**: Validate paths and prevent traversal:
+
+```csharp
+private static string ValidateOutputPath(string outputDirectory, string filename)
+{
+    // Normalize and validate the output directory
+    var normalizedDir = Path.GetFullPath(outputDirectory);
+    
+    // Ensure it's not a system directory
+    var systemDirs = new[]
+    {
+        Environment.GetFolderPath(Environment.SpecialFolder.System),
+        Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+        Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles)
+    };
+    
+    if (systemDirs.Any(d => normalizedDir.StartsWith(d, StringComparison.OrdinalIgnoreCase)))
+        throw new SecurityException("Cannot write to system directories");
+    
+    // Validate filename doesn't contain path traversal
+    if (filename.Contains("..") || Path.GetFileName(filename) != filename)
+        throw new SecurityException("Invalid filename");
+    
+    var fullPath = Path.GetFullPath(Path.Combine(normalizedDir, filename));
+    
+    // Ensure the final path is still within the output directory
+    if (!fullPath.StartsWith(normalizedDir, StringComparison.OrdinalIgnoreCase))
+        throw new SecurityException("Path traversal detected");
+    
+    return fullPath;
+}
+```
+
+### 3. **Unvalidated File Downloads**
+**Location**: `StockfishDownloader.cs`
+
+**Problem**: Downloads from GitHub without certificate validation or size limits.
+
+**Fix**:
+
+```csharp
+private static readonly long MaxDownloadSize = 500 * 1024 * 1024; // 500 MB
+
+private async Task<byte[]> SafeDownloadAsync(string url, IProgress<string>? progress = null)
+{
+    using var response = await _httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+    response.EnsureSuccessStatusCode();
+    
+    // Check content length before downloading
+    if (response.Content.Headers.ContentLength > MaxDownloadSize)
+        throw new InvalidOperationException($"Download too large: {response.Content.Headers.ContentLength} bytes");
+    
+    var buffer = new byte[8192];
+    var totalBytes = 0L;
+    
+    using var stream = await response.Content.ReadAsStreamAsync();
+    using var memoryStream = new MemoryStream();
+    
+    int bytesRead;
+    while ((bytesRead = await stream.ReadAsync(buffer)) > 0)
+    {
+        totalBytes += bytesRead;
+        if (totalBytes > MaxDownloadSize)
+            throw new InvalidOperationException("Download exceeded maximum size");
+        
+        await memoryStream.WriteAsync(buffer.AsMemory(0, bytesRead));
+    }
+    
+    return memoryStream.ToArray();
+}
+```
+
+## Memory Leaks
+
+### 4. **Static HttpClient Leaking**
+**Location**: `StockfishDownloader.cs` - Line 13
+
+```csharp
+private static readonly HttpClient _httpClient = new();
+```
+
+**Problem**: Static HttpClient never disposed, and multiple instances in `CompilerInstallerService`.
+
+**Fix**: Use IHttpClientFactory pattern:
+
+```csharp
+// In App.xaml.cs
+services.AddHttpClient<IStockfishDownloader, StockfishDownloader>();
+services.AddHttpClient<ICompilerInstallerService, CompilerInstallerService>();
+
+// In StockfishDownloader.cs
+public class StockfishDownloader : IStockfishDownloader
+{
+    private readonly HttpClient _httpClient;
+    
+    public StockfishDownloader(HttpClient httpClient)
+    {
+        _httpClient = httpClient;
+        _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("StockfishCompiler/1.0");
+    }
+}
+```
+
+### 5. **Subject Disposal Missing**
+**Location**: `BuildService.cs` - Lines 17-19
+
+```csharp
+private readonly Subject<string> _outputSubject = new();
+private readonly Subject<double> _progressSubject = new();
+private readonly Subject<bool> _isBuildingSubject = new();
+```
+
+**Problem**: Subjects never disposed, causing memory leaks.
+
+**Fix**: Implement IDisposable:
+
+```csharp
+public class BuildService : IBuildService, IDisposable
+{
+    private readonly Subject<string> _outputSubject = new();
+    private readonly Subject<double> _progressSubject = new();
+    private readonly Subject<bool> _isBuildingSubject = new();
+    private bool _disposed;
+    
+    public void Dispose()
+    {
+        if (_disposed) return;
+        
+        _outputSubject?.Dispose();
+        _progressSubject?.Dispose();
+        _isBuildingSubject?.Dispose();
+        _cts?.Dispose();
+        
+        _disposed = true;
+    }
+}
+
+// Register as scoped in DI
+services.AddScoped<IBuildService, BuildService>();
+```
+
+### 6. **Process Output Not Fully Consumed**
+**Location**: `BuildService.CompileStockfishAsync()`
+
+**Problem**: If process outputs huge amounts of data, buffers can fill up and cause deadlocks.
+
+**Fix**: Read output asynchronously properly:
+
+```csharp
+private async Task<CompilationResult> CompileStockfishAsync(string sourcePath, BuildConfiguration config, CancellationToken token)
+{
+    // ... existing setup ...
+    
+    var outputBuilder = new StringBuilder();
+    var errorBuilder = new StringBuilder();
+    
+    var outputTask = Task.Run(async () =>
+    {
+        while (!process.StandardOutput.EndOfStream)
+        {
+            var line = await process.StandardOutput.ReadLineAsync();
+            if (line != null)
+            {
+                outputBuilder.AppendLine(line);
+                _outputSubject.OnNext(line);
+            }
+        }
+    }, token);
+    
+    var errorTask = Task.Run(async () =>
+    {
+        while (!process.StandardError.EndOfStream)
+        {
+            var line = await process.StandardError.ReadLineAsync();
+            if (line != null)
+            {
+                errorBuilder.AppendLine(line);
+                _outputSubject.OnNext(line);
+            }
+        }
+    }, token);
+    
+    process.Start();
+    
+    await Task.WhenAll(outputTask, errorTask);
+    await process.WaitForExitAsync(token);
+    
+    return new CompilationResult
+    {
+        Success = process.ExitCode == 0,
+        Output = outputBuilder.ToString() + errorBuilder.ToString(),
+        ExitCode = process.ExitCode
+    };
+}
+```
+
+## Resource Management Issues
+
+### 7. **Temp Directory Cleanup Failure**
+**Location**: `BuildService.CleanupTempDirectory()`
+
+**Problem**: Silent failure on cleanup can leave gigabytes of temp files.
+
+**Fix**: Implement retry logic with logging:
+
+```csharp
+private async Task CleanupTempDirectoryAsync(string? tempDirectory, ILogger logger)
+{
+    if (string.IsNullOrWhiteSpace(tempDirectory) || !Directory.Exists(tempDirectory))
+        return;
+    
+    const int maxRetries = 3;
+    
+    for (int i = 0; i < maxRetries; i++)
+    {
+        try
+        {
+            Directory.Delete(tempDirectory, true);
+            _outputSubject.OnNext($"Cleaned up temporary directory: {tempDirectory}");
+            return;
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            logger.LogWarning(ex, "Attempt {Attempt} to delete temp dir failed (access denied)", i + 1);
+        }
+        catch (IOException ex) when (i < maxRetries - 1)
+        {
+            logger.LogWarning(ex, "Attempt {Attempt} to delete temp dir failed (IO error)", i + 1);
+            await Task.Delay(1000 * (i + 1)); // Exponential backoff
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "Failed to delete temp directory: {Path}", tempDirectory);
+            break;
+        }
+    }
+    
+    _outputSubject.OnNext($"Warning: Could not fully clean up {tempDirectory}. Manual cleanup may be needed.");
+}
+```
+
+### 8. **File Handle Leaks in CompilerService**
+**Location**: `CompilerService.cs` - Multiple locations
+
+**Problem**: Process objects may not be disposed on exceptions.
+
+**Fix**: Use proper async disposal:
+
+```csharp
+private async Task<string> GetCompilerVersionAsync(string compilerPath)
+{
+    Process? process = null;
+    try
+    {
+        var psi = new ProcessStartInfo
+        {
+            FileName = compilerPath,
+            Arguments = "--version",
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false,
+            CreateNoWindow = true
+        };
+
+        process = Process.Start(psi);
+        if (process == null)
+            return string.Empty;
+
+        var output = await process.StandardOutput.ReadToEndAsync();
+        await process.WaitForExitAsync();
+        
+        return output.Split('\n').FirstOrDefault()?.Trim() ?? string.Empty;
+    }
+    catch (Exception ex)
+    {
+        logger.LogDebug(ex, "Failed to get version for {Path}", compilerPath);
+        return string.Empty;
+    }
+    finally
+    {
+        process?.Dispose();
+    }
+}
+```
+
+## Additional Security Concerns
+
+### 9. **Regex Denial of Service (ReDoS)**
+**Location**: `StockfishDownloader.cs` - Lines 14-16
+
+**Problem**: Complex regex patterns can cause ReDoS attacks.
+
+**Fix**: Add timeouts:
+
+```csharp
+private static readonly Regex NetworkMacroRegex = new(
+    "#define\\s+EvalFileDefaultName\\w*\\s+\"(nn-[a-z0-9]{12}\\.nnue)\"",
+    RegexOptions.IgnoreCase | RegexOptions.Compiled,
+    TimeSpan.FromSeconds(1));
+
+private static readonly Regex NetworkFileNameRegex = new(
+    "nn-([a-f0-9]{12})\\.nnue",
+    RegexOptions.IgnoreCase | RegexOptions.Compiled,
+    TimeSpan.FromSeconds(1));
+```
+
+### 10. **SHA256 Hash Not Disposed**
+**Location**: `StockfishDownloader.ValidateNetworkBytes()`
+
+**Problem**: HashAlgorithm should be disposed.
+
+**Fix**:
+
+```csharp
+private static bool ValidateNetworkBytes(byte[] bytes, string fileName)
+{
+    if (bytes.Length < 1_000_000)
+        return false;
+
+    var match = NetworkFileNameRegex.Match(fileName);
+    if (!match.Success)
+        return true;
+
+    var expectedPrefix = match.Groups[1].Value.ToLowerInvariant();
+    
+    using var sha256 = SHA256.Create();
+    var hash = Convert.ToHexString(sha256.ComputeHash(bytes)).ToLowerInvariant();
+    
+    return hash.StartsWith(expectedPrefix, StringComparison.Ordinal);
+}
+```
+
+## Summary of Recommended Actions
+
+1. **Immediate**: Fix command injection and path traversal vulnerabilities
+2. **High Priority**: Implement HttpClient factory pattern and dispose Subjects
+3. **Medium Priority**: Add input validation throughout, implement proper async disposal
+4. **Low Priority**: Add regex timeouts, improve error handling
+
+Would you like me to provide complete refactored versions of the most critical files?
+
+===================================================
+
+We are given two files: one is a full context of a C# WPF application (StockfishCompiler) and the other is a documentation file about compiling Stockfish.
+
+The task is to examine the repo (as represented by the full-context.txt) and identify problematic areas, then suggest fixes.
+
+Let's break down the analysis:
+
+Overview of the Application:
+
+The application is a WPF GUI for compiling the Stockfish chess engine.
+
+It automatically detects compilers (MSYS2, MinGW, Clang) and CPU architectures to build an optimized Stockfish.
+
+Key Components:
+
+Project File: StockfishCompiler.csproj
+
+App.xaml and App.xaml.cs: Application entry point, DI setup, logging.
+
+MainWindow.xaml and MainWindow.xaml.cs: Main UI window.
+
+Views: CompilerSelectionView, BuildConfigurationView, BuildProgressView.
+
+ViewModels: MainViewModel, BuildViewModel.
+
+Models: ArchitectureInfo, BuildConfiguration, CompilationResult, CompilerInfo.
+
+Services: IArchitectureDetector, ArchitectureDetector, IBuildService, BuildService, ICompilerService, CompilerService, IStockfishDownloader, StockfishDownloader, ICompilerInstallerService, CompilerInstallerService.
+
+Converters: ValueConverters for XAML.
+
+Resources: DarkTheme.xaml for styling.
+
+Other Files: README.md, TROUBLESHOOTING.md, BuildRelease.bat, OpenLogs.bat.
+
+Potential Problem Areas:
+
+a. Compiler Detection:
+
+The CompilerService attempts to detect compilers in multiple locations (MSYS2, Git for Windows, Visual Studio, MinGW standalone, PATH).
+
+It uses a method WhichAsync to find compilers in the PATH.
+
+However, the WhichAsync method uses Process.Start to run where (Windows) or which (Unix) which might be slow and might not be reliable if the environment variables are not set correctly.
+
+b. Architecture Detection:
+
+The ArchitectureDetector currently uses a minimal placeholder that only checks the process architecture and returns a fixed set of features.
+
+It does not actually run the compiler to detect CPU features (as done in the provided stockfish_compilation.txt script for GCC and Clang).
+
+c. Stockfish Download and Build:
+
+The StockfishDownloader downloads the source and neural networks.
+
+The BuildService compiles Stockfish by invoking make with the detected architecture and compiler.
+
+The build process uses a method to disable the net target in the Makefile to avoid redundant downloads, but this might be error-prone.
+
+d. MSYS2 Installation:
+
+The CompilerInstallerService downloads and installs MSYS2 and then installs the necessary packages.
+
+The installation of packages uses bash and pacman commands. This might fail if the MSYS2 installation is not in the expected state.
+
+e. Error Handling and Logging:
+
+The application uses Serilog for logging, which is good. However, we must ensure that all exceptions are caught and logged appropriately.
+
+f. UI and Data Binding:
+
+The UI uses the CommunityToolkit.Mvvm for data binding and commands. We must ensure that the properties are correctly set up and that the UI updates appropriately.
+
+g. Publishing and Deployment:
+
+The project is set to not publish as a single file and not self-contained. This is acceptable, but we must ensure that the .NET 8 runtime is installed on the target machine.
+
+Specific Issues and Improvements:
+
+a. Compiler Detection:
+
+The current compiler detection might miss some compilers if they are not in the expected paths.
+
+We can improve by also checking the environment variables for common compiler paths.
+
+b. Architecture Detection:
+
+The current architecture detection does not actually detect the CPU features. We should run the compiler (as in the provided scripts) to get the actual supported features.
+
+We can use the same method as in the provided scripts (using g++ -Q -march=native --help=target for GCC and clang++ -E - -march=native -### for Clang) to get the enabled features and then map to the Stockfish architectures.
+
+c. Build Process:
+
+The build process currently uses a hardcoded method to find make. This might not work if the user has multiple MSYS2 installations.
+
+We can improve by using the same method as in the StockfishDownloader to find the make command.
+
+d. Neural Network Download:
+
+The StockfishDownloader attempts to download the neural network by reading the evaluate.h file to get the default network name. This is good, but we should ensure that the network is validated (as in the provided script) by checking the SHA256 hash.
+
+e. MSYS2 Installation:
+
+The installation process might be interrupted if the user cancels or if there is a network issue. We should add more error handling and rollback if possible.
+
+f. Logging:
+
+The logging is set up to write to a file. We should also consider logging to the console in debug mode.
+
+g. UI Responsiveness:
+
+The long-running operations (compiler detection, architecture detection, build) are done asynchronously. We must ensure that the UI remains responsive and that the user can cancel the operations.
+
+Code Quality:
+
+The code is generally well-structured and uses modern C# and WPF practices.
+
+There are some places where exception handling could be improved, and more detailed logging could be added.
+
+Documentation:
+
+The README.md and TROUBLESHOOTING.md are comprehensive and should help users.
+
+Now, let's list the most critical issues and their fixes:
+
+Critical Issue 1: Architecture Detection is Not Actual
+
+The current ArchitectureDetector does not actually detect the CPU features. It returns a fixed set of features based on the process architecture. This means that the application might not select the optimal architecture for the user's CPU.
+
+Fix: Implement actual feature detection by running the compiler and parsing the output, similar to the provided scripts.
+
+We can create a method in IArchitectureDetector that runs the compiler (GCC or Clang) with specific flags to get the enabled features and then map them to the Stockfish architectures.
+
+Example for GCC:
+
+csharp
+private async Task<List<string>> DetectCPUFeaturesWithGCCAsync(string compilerPath)
+{
+    var startInfo = new ProcessStartInfo
+    {
+        FileName = compilerPath,
+        Arguments = "-Q -march=native --help=target",
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        UseShellExecute = false,
+        CreateNoWindow = true
+    };
+
+    using var process = Process.Start(startInfo);
+    if (process == null)
+        return new List<string>();
+
+    var output = await process.StandardOutput.ReadToEndAsync();
+    await process.WaitForExitAsync();
+
+    // Parse the output to extract the enabled flags
+    // The output has lines like: ` -mflag [enabled]`
+    var features = new List<string>();
+    foreach (var line in output.Split('\n'))
+    {
+        if (line.Contains("[enabled]"))
+        {
+            var parts = line.Trim().Split(' ');
+            if (parts.Length >= 2)
+            {
+                var flag = parts[1];
+                if (flag.StartsWith("-m"))
+                    flag = flag.Substring(2);
+                features.Add(flag);
+            }
+        }
+    }
+
+    return features;
+}
+Similarly, for Clang, we can use:
+
+csharp
+private async Task<List<string>> DetectCPUFeaturesWithClangAsync(string compilerPath)
+{
+    var startInfo = new ProcessStartInfo
+    {
+        FileName = compilerPath,
+        Arguments = "-E - -march=native -###",
+        RedirectStandardOutput = true,
+        RedirectStandardError = true,
+        UseShellExecute = false,
+        CreateNoWindow = true
+    };
+
+    using var process = Process.Start(startInfo);
+    if (process == null)
+        return new List<string>();
+
+    var error = await process.StandardError.ReadToEndAsync();
+    await process.WaitForExitAsync();
+
+    // Parse the error output to get the target features
+    // The output has lines like: ` "-target-feature" "+feature"`
+    var features = new List<string>();
+    foreach (var line in error.Split('\n'))
+    {
+        if (line.Contains("-target-feature"))
+        {
+            var parts = line.Trim().Split(' ');
+            if (parts.Length >= 2)
+            {
+                var feature = parts[1].Trim('"');
+                if (feature.StartsWith("+"))
+                    features.Add(feature.Substring(1));
+            }
+        }
+    }
+
+    return features;
+}
+Then, in DetectCPUFeaturesAsync, we can call the appropriate method based on the compiler type.
+
+Critical Issue 2: Make Command Detection Might Fail
+
+The FindMakeCommand method in BuildService and StockfishDownloader might not find the make command if the MSYS2 installation is in a non-standard location.
+
+Fix: We can use the same method as in the CompilerService to detect the MSYS2 installation and then look for make in the usr/bin and mingw64/bin directories.
+
+We can also consider using the WhichAsync method to find make in the PATH, but note that the PATH might be set by the MSYS2 shell but not in the WPF application's environment.
+
+Alternatively, we can rely on the user's selected compiler to determine the MSYS2 root and then look for make in the known subdirectories.
+
+Critical Issue 3: Neural Network Validation
+
+The ValidateNetworkBytes method in StockfishDownloader checks the SHA256 hash of the downloaded network against the expected prefix. However, the expected prefix is taken from the filename, which is derived from the evaluate.h file. This is correct, but we should note that the network file might be updated and the hash might change. The current method only checks that the hash starts with the expected prefix (the first 12 characters of the hash). This is acceptable because the Stockfish project uses the first 12 characters of the hash as the network ID.
+
+Critical Issue 4: MSYS2 Installation Might Fail Silently
+
+The CompilerInstallerService runs the MSYS2 installer and then runs package installation. If the package installation fails, the user might not get a clear error message.
+
+Fix: We should check the exit codes of the package installation commands and log the output. We can also show the output in the progress report.
+
+Critical Issue 5: Compiler Detection Might Be Slow
+
+The compiler detection runs multiple searches in parallel and also uses the WhichAsync method which starts a process. This might be slow.
+
+Fix: We can consider caching the results or running the detection in the background during startup. We can also provide a way to manually specify the compiler path.
+
+Other Issues:
+
+The BuildService uses a hardcoded method to disable the net target in the Makefile. This might break if the Makefile changes. We should consider instead using a make variable to override the net target, or we can let the build process handle the network download and then remove the redundant download.
+
+Given the complexity of the application, we will focus on the most critical issue: the architecture detection.
+
+Let's propose a refactored ArchitectureDetector that actually runs the compiler to detect the features.
+
+We will:
+
+Add methods to run the compiler and get the features for GCC and Clang.
+
+Use the features to determine the optimal architecture.
+
+We will update the DetectCPUFeaturesAsync method to use the compiler-specific methods.
+
+We will also update the DetectOptimalArchitectureAsync method to use the detected features.
+
+Note: The ArchitectureDetector currently has a method GetAvailableArchitecturesAsync that returns a fixed list. We can keep that.
+
+Let's rewrite the ArchitectureDetector.cs:
+
+We'll add the two helper methods for GCC and Clang, and then in DetectCPUFeaturesAsync we'll call the appropriate one based on the compiler type.
+
+We'll also update the DetermineOptimalArchitecture method to use the same logic as in the provided scripts.
+
+However, note that the provided scripts have different logic for GCC and Clang. We are now using the same method for both, but the feature names might differ. We should map the features to a common set.
+
+Alternatively, we can use the same method as in the scripts: for GCC, we use -Q -march=native --help=target and for Clang we use -E - -march=native -### and then parse the output.
+
+We'll create two private methods for GCC and Clang.
+
+We'll also note that the provided script for GCC uses:
+
+bash
+output=$(g++ -Q -march=native --help=target)
+flags=$(printf '%s\n' "$output" | awk '/\[enabled\]/ {print substr($1, 3)}' | tr '\n' ' ')
+arch=$(printf '%s\n' "$output" | awk '/march/ {print $NF; exit}' | tr -d '[:space:]')
+We are already getting the flags and the arch in the GCC method.
+
+Similarly, for Clang, the script uses:
+
+bash
+output=$(clang++ -E - -march=native -### 2>&1)
+flags=$(printf '%s\n' "$output" | grep -o '"-target-feature" "[^"]*"' | cut -d '"' -f 4 | grep '^\+' | cut -c 2- | tr '\n' ' ')
+arch=$(printf '%s\n' "$output" | grep -o '"-target-cpu" "[^"]*"' | cut -d '"' -f 4)
+We can do the same in our code.
+
+Let's implement:
+
+csharp
+public class ArchitectureDetector : IArchitectureDetector
+{
+    private readonly ILogger<ArchitectureDetector> _logger;
+
+    public ArchitectureDetector(ILogger<ArchitectureDetector> logger)
+    {
+        _logger = logger;
+    }
+
+    // ... existing code ...
+
+    public async Task<List<string>> DetectCPUFeaturesAsync(CompilerInfo compiler)
+    {
+        if (compiler.Type == "gcc" || compiler.Type == "mingw")
+        {
+            return await DetectCPUFeaturesWithGCCAsync(compiler.Path);
+        }
+        else if (compiler.Type == "clang")
+        {
+            return await DetectCPUFeaturesWithClangAsync(compiler.Path);
+        }
+        else
+        {
+            _logger.LogWarning("Unsupported compiler for feature detection: {CompilerType}", compiler.Type);
+            return new List<string>();
+        }
+    }
+
+    private async Task<List<string>> DetectCPUFeaturesWithGCCAsync(string compilerPath)
+    {
+        try
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = Path.Combine(compilerPath, "g++"),
+                Arguments = "-Q -march=native --help=target",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using var process = Process.Start(startInfo);
+            if (process == null)
+                return new List<string>();
+
+            var output = await process.StandardOutput.ReadToEndAsync();
+            await process.WaitForExitAsync();
+
+            var features = new List<string>();
+            foreach (var line in output.Split('\n'))
+            {
+                if (line.Contains("[enabled]"))
+                {
+                    var parts = line.Trim().Split(' ');
+                    if (parts.Length >= 2)
+                    {
+                        var flag = parts[1];
+                        if (flag.StartsWith("-m"))
+                            flag = flag.Substring(2);
+                        features.Add(flag);
+                    }
+                }
+            }
+
+            return features;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to detect CPU features with GCC");
+            return new List<string>();
+        }
+    }
+
+    private async Task<List<string>> DetectCPUFeaturesWithClangAsync(string compilerPath)
+    {
+        try
+        {
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = Path.Combine(compilerPath, "clang++"),
+                Arguments = "-E - -march=native -###",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using var process = Process.Start(startInfo);
+            if (process == null)
+                return new List<string>();
+
+            var error = await process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync();
+
+            var features = new List<string>();
+            foreach (var line in error.Split('\n'))
+            {
+                if (line.Contains("-target-feature"))
+                {
+                    var parts = line.Trim().Split(' ');
+                    if (parts.Length >= 2)
+                    {
+                        var feature = parts[1].Trim('"');
+                        if (feature.StartsWith("+"))
+                            features.Add(feature.Substring(1));
+                    }
+                }
+            }
+
+            return features;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Failed to detect CPU features with Clang");
+            return new List<string>();
+        }
+    }
+
+    // ... existing code ...
+}
+We must note that the compiler path might be a directory, so we combine it with the compiler executable (g++ or clang++). Also, we are using the same executable names as in the scripts.
+
+Now, we can update the DetermineOptimalArchitecture method to use the same logic as in the scripts.
+
+The provided script for GCC uses:
+
+bash
+if check_flags 'avx512vnni' 'avx512dq' 'avx512f' 'avx512bw' 'avx512vl'; then
+  arch_cpu='x86-64-vnni256'
+elif check_flags 'avx512f' 'avx512bw'; then
+  arch_cpu='x86-64-avx512'
+elif check_flags 'bmi2' && [ $arch != 'znver1' ] && [ $arch != 'znver2' ]; then
+  arch_cpu='x86-64-bmi2'
+elif check_flags 'avx2'; then
+  arch_cpu='x86-64-avx2'
+elif check_flags 'sse4.1' 'popcnt'; then
+  arch_cpu='x86-64-sse41-popcnt'
+elif check_flags 'ssse3'; then
+  arch_cpu='x86-64-ssse3'
+elif check_flags 'sse3' 'popcnt'; then
+  arch_cpu='x86-64-sse3-popcnt'
+else
+  arch_cpu='x86-64'
+fi
+We can implement the same in DetermineOptimalArchitecture:
+
+We'll create a helper method CheckFlags that checks if all the required flags are in the features list.
+
+We also need the architecture string (for the GCC case) to check for AMD Zen (znver1, znver2). We can get the architecture from the GCC output by looking for the -march option.
+
+We'll modify the DetectCPUFeaturesWithGCCAsync to return both the features and the architecture.
+
+We can do the same for Clang? The Clang script also gets the architecture. Let's update the methods to return a tuple (features, architecture).
+
+We'll change the DetectCPUFeaturesAsync to return a tuple as well.
+
+Then, in DetectOptimalArchitectureAsync, we can use both the features and the architecture.
+
+Let's refactor:
+
+We'll change the DetectCPUFeaturesAsync to return Task<(List<string> Features, string Architecture)>.
+
+We'll update the GCC and Clang methods to return the architecture as well.
+
+For GCC, we can parse the -march value from the output.
+
+For Clang, we can parse the -target-cpu value.
+
+We'll update the DetermineOptimalArchitecture to take the features and the architecture.
+
+We'll also update the DetectOptimalArchitectureAsync method to use the new return type.
+
+This is a significant change, but it's necessary for accurate detection.
+
+Due to the complexity and the fact that this is a critical part of the application, we must implement this carefully.
+
+Given the time constraints, we will outline the changes:
+
+Change the IArchitectureDetector interface:
+
+csharp
+public interface IArchitectureDetector
+{
+    Task<ArchitectureInfo> DetectOptimalArchitectureAsync(CompilerInfo compiler);
+    Task<List<ArchitectureInfo>> GetAvailableArchitecturesAsync();
+    Task<(List<string> Features, string Architecture)> DetectCPUFeaturesAsync(CompilerInfo compiler);
+}
+Update the ArchitectureDetector methods accordingly.
+
+In DetectOptimalArchitectureAsync:
+
+csharp
+var (features, arch) = await DetectCPUFeaturesAsync(compiler);
+var optimalArchId = DetermineOptimalArchitecture(features, arch);
+Implement DetermineOptimalArchitecture with the logic from the script.
+
+We must also note that the provided script for Clang uses the same architecture names as GCC? Actually, the Clang script uses the same arch_cpu values, so we can use the same mapping.
+
+We'll implement the DetermineOptimalArchitecture method as:
+
+csharp
+private static string DetermineOptimalArchitecture(List<string> features, string arch)
+{
+    bool CheckFlags(params string[] requiredFlags)
+    {
+        return requiredFlags.All(flag => features.Contains(flag));
+    }
+
+    if (CheckFlags("avx512vnni", "avx512dq", "avx512f", "avx512bw", "avx512vl"))
+        return "x86-64-vnni256";
+    if (CheckFlags("avx512f", "avx512bw"))
+        return "x86-64-avx512";
+    if (CheckFlags("bmi2") && arch != "znver1" && arch != "znver2")
+        return "x86-64-bmi2";
+    if (CheckFlags("avx2"))
+        return "x86-64-avx2";
+    if (CheckFlags("sse4.1", "popcnt"))
+        return "x86-64-sse41-popcnt";
+    if (CheckFlags("ssse3"))
+        return "x86-64-ssse3";
+    if (CheckFlags("sse3", "popcnt"))
+        return "x86-64-sse3-popcnt";
+    return "x86-64";
+}
+We must also handle the case when the architecture is not x86-64 (e.g., ARM). We can use the same fallback as before.
+
+This is a complex change and we must test it thoroughly.
+
+Given the scope of the change, we might not be able to complete it in one go, but we must start by implementing the feature detection.
+
+We will also note that the ArchitectureDetector currently does not take a CompilerInfo in the DetectCPUFeaturesAsync method? Actually, we are passing the compiler path and type. We are using the compiler path to run the compiler.
+
+We must ensure that the compiler path is the directory containing the compiler, and then we run the compiler executable (g++ or clang++) from that directory.
+
+Alternatively, we can use the full path to the compiler if the CompilerInfo has the full path. Actually, the CompilerInfo has a Path property which is the directory, and a Name property which is the executable name. We should use the full path by combining Path and Name? But note that the Name might be just the executable without the path.
+
+We are currently using Path.Combine(compilerPath, "g++") and Path.Combine(compilerPath, "clang++"). This assumes that the compiler is named g++ or clang++ and is in the directory compilerPath. This might not be true if the compiler is a different executable (like g++-10). We should use the Name property of the CompilerInfo? But note that the CompilerInfo might have the name as g++.exe on Windows.
+
+We can use the Name property, but note that the Name might be set to g++.exe and we are running on Windows, so we can use the Name without the extension? Actually, we can run the compiler with the full path.
+
+We can change the DetectCPUFeaturesWithGCCAsync to take the full path to the compiler. We can get the full path by combining the compiler.Path and compiler.Name? But note that the compiler.Name might be just the executable name, and the compiler.Path is the directory.
+
+We can do:
+
+csharp
+var compilerExe = Path.Combine(compiler.Path, compiler.Name);
+But note that the compiler.Name might be g++ and the compiler.Path might be C:\msys64\mingw64\bin, so the full path would be C:\msys64\mingw64\bin\g++.
+
+We can use that.
+
+We'll change the methods to take the full path to the compiler.
+
+We'll update the DetectCPUFeaturesAsync to use the full path:
+
+csharp
+public async Task<(List<string> Features, string Architecture)> DetectCPUFeaturesAsync(CompilerInfo compiler)
+{
+    var compilerExe = Path.Combine(compiler.Path, compiler.Name);
+    if (compiler.Type == "gcc" || compiler.Type == "mingw")
+    {
+        return await DetectCPUFeaturesWithGCCAsync(compilerExe);
+    }
+    else if (compiler.Type == "clang")
+    {
+        return await DetectCPUFeaturesWithClangAsync(compilerExe);
+    }
+    else
+    {
+        _logger.LogWarning("Unsupported compiler for feature detection: {CompilerType}", compiler.Type);
+        return (new List<string>(), string.Empty);
+    }
+}
+Then, in the GCC and Clang methods, we use compilerExe as the FileName.
+
+We must also note that on Windows, the executable might have an extension. We are using the compiler.Name which might be g++.exe. This is acceptable because Process.Start will run it.
+
+We must also note that the compiler might be a symlink or a batch file? We are assuming it's a real executable.
+
+This change will make the architecture detection more accurate.
+
+We must also consider that running the compiler might take time, so we should show a progress indicator and allow cancellation.
+
+We are now only running the compiler when the user clicks "Detect Optimal Architecture". We should also consider caching the result.
+
+Given the complexity and the fact that this is a critical feature, we must implement this and test it with various compilers and CPUs.
+
+We will also update the GetAvailableArchitecturesAsync to include the new architectures (like x86-64-vnni256).
+
+We must also note that the ArchitectureInfo class has an Id that must match the Stockfish architecture names.
+
+We have already included x86-64-vnni256 in the list in GetAvailableArchitecturesAsync.
+
+This is a major refactor and we must be cautious.
+
+We will also update the BuildService to use the same architecture id when building.
+
+We must also note that the BuildService uses the SelectedArchitecture.Id when building.
+
+We are now returning the correct architecture id from the DetectOptimalArchitectureAsync method.
+
+We must also update the MainViewModel to use the new architecture detection.
+
+We are now passing the CompilerInfo to the DetectOptimalArchitectureAsync method.
+
+We must ensure that the SelectedCompiler is not null when we call DetectOptimalArchitectureAsync.
+
+We are already checking that in the MainViewModel.
+
+We must also update the BuildViewModel to use the same architecture.
+
+We are passing the SelectedArchitecture from the MainViewModel to the BuildConfiguration.
+
+We must also note that the ArchitectureDetector might throw exceptions, so we must catch and log them.
+
+We are already catching exceptions in the MainViewModel when calling DetectOptimalArchitectureAsync.
+
+We must also consider that the compiler might not be in the PATH, but we are using the full path, so it should work.
+
+We must also consider that the compiler might not support the -march=native flag? We are using it for both GCC and Clang. It is supported by both, but if the compiler is old, it might not. We should handle that.
+
+We can try to run the compiler without -march=native and then use a fallback.
+
+We are now using -march=native to get the features for the current CPU. If the compiler doesn't support it, we can try to use the host architecture.
+
+But note that the user might be cross-compiling? We are building for the current machine, so -march=native is appropriate.
