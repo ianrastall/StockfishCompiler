@@ -1,4 +1,6 @@
 using System.Collections.ObjectModel;
+using System.Reactive.Concurrency;
+using System.Reactive.Linq;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.Logging;
@@ -14,6 +16,8 @@ public partial class BuildViewModel : ObservableObject, IDisposable
     private readonly ILogger<BuildViewModel> _logger;
     private readonly List<IDisposable> _subscriptions = new();
 
+    private const int MaxOutputLines = 1000;
+
     public BuildViewModel(IBuildService buildService, MainViewModel mainViewModel, ILogger<BuildViewModel> logger)
     {
         _buildService = buildService;
@@ -25,19 +29,28 @@ public partial class BuildViewModel : ObservableObject, IDisposable
         StartBuildCommand = new AsyncRelayCommand(StartBuildAsync, () => !IsBuilding);
         CancelBuildCommand = new RelayCommand(CancelBuild, () => IsBuilding);
 
-        _subscriptions.Add(_buildService.Output.Subscribe(line => 
-        {
-            BuildOutput += line + Environment.NewLine;
-        }));
-
-        _subscriptions.Add(_buildService.Progress.Subscribe(p => BuildProgress = p));
+        // Marshal all observable subscriptions to UI thread
+        var uiScheduler = new SynchronizationContextScheduler(SynchronizationContext.Current!);
         
-        _subscriptions.Add(_buildService.IsBuilding.Subscribe(b => 
-        {
-            IsBuilding = b;
-            StartBuildCommand.NotifyCanExecuteChanged();
-            CancelBuildCommand.NotifyCanExecuteChanged();
-        }));
+        _subscriptions.Add(_buildService.Output
+            .ObserveOn(uiScheduler)
+            .Subscribe(line => 
+            {
+                AppendOutput(line);
+            }));
+
+        _subscriptions.Add(_buildService.Progress
+            .ObserveOn(uiScheduler)
+            .Subscribe(p => BuildProgress = p));
+        
+        _subscriptions.Add(_buildService.IsBuilding
+            .ObserveOn(uiScheduler)
+            .Subscribe(b => 
+            {
+                IsBuilding = b;
+                StartBuildCommand.NotifyCanExecuteChanged();
+                CancelBuildCommand.NotifyCanExecuteChanged();
+            }));
 
         _logger.LogInformation("BuildViewModel initialized");
     }
@@ -53,6 +66,19 @@ public partial class BuildViewModel : ObservableObject, IDisposable
 
     public IAsyncRelayCommand StartBuildCommand { get; }
     public IRelayCommand CancelBuildCommand { get; }
+
+    private void AppendOutput(string line)
+    {
+        BuildOutput += line + Environment.NewLine;
+
+        // Implement circular buffer to prevent unbounded memory growth
+        var lineCount = BuildOutput.Count(c => c == '\n');
+        if (lineCount > MaxOutputLines)
+        {
+            var lines = BuildOutput.Split('\n');
+            BuildOutput = string.Join('\n', lines[^MaxOutputLines..]);
+        }
+    }
 
     private async Task StartBuildAsync()
     {
@@ -110,7 +136,6 @@ public partial class BuildViewModel : ObservableObject, IDisposable
             BuildOutput += "==============================================\n";
         }
     }
-
     private void CancelBuild()
     {
         _logger.LogInformation("Build cancelled by user");

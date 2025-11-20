@@ -234,7 +234,21 @@ public partial class MainViewModel : ObservableObject
 
     partial void OnDownloadNetworkChanged(bool value) => PersistUserSettings();
     partial void OnStripExecutableChanged(bool value) => PersistUserSettings();
-    partial void OnParallelJobsChanged(int value) => PersistUserSettings();
+    partial void OnParallelJobsChanged(int value)
+    {
+        // Clamp parallel jobs to reasonable range
+        var maxJobs = Environment.ProcessorCount * 4;
+        if (value < 1)
+        {
+            ParallelJobs = 1;
+        }
+        else if (value > maxJobs)
+        {
+            ParallelJobs = maxJobs;
+        }
+        
+        PersistUserSettings();
+    }
     partial void OnOutputDirectoryChanged(string value) => PersistUserSettings();
     partial void OnSourceVersionChanged(string value) => PersistUserSettings();
 

@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using StockfishCompiler.Helpers;
 using StockfishCompiler.Models;
 
 namespace StockfishCompiler.Services;
@@ -26,18 +27,16 @@ public class StockfishDownloader : IStockfishDownloader
     public StockfishDownloader(HttpClient httpClient)
     {
         _httpClient = httpClient;
-        EnsureUserAgent();
     }
 
-    public async Task<ReleaseInfo?> GetLatestReleaseAsync()
+    public async Task<ReleaseInfo?> GetLatestReleaseAsync(CancellationToken cancellationToken = default)
     {
         try
         {
-            EnsureUserAgent();
-            using var response = await _httpClient.GetAsync(GitHubApiUrl, HttpCompletionOption.ResponseHeadersRead);
+            using var response = await _httpClient.GetAsync(GitHubApiUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
             response.EnsureSuccessStatusCode();
-            using var stream = await response.Content.ReadAsStreamAsync();
-            using var doc = await JsonDocument.ParseAsync(stream);
+            using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
             var root = doc.RootElement;
             return new ReleaseInfo
             {
@@ -52,7 +51,7 @@ public class StockfishDownloader : IStockfishDownloader
         }
     }
 
-    public async Task<SourceDownloadResult> DownloadSourceAsync(string version, IProgress<string>? progress = null)
+    public async Task<SourceDownloadResult> DownloadSourceAsync(string version, IProgress<string>? progress = null, CancellationToken cancellationToken = default)
     {
         progress?.Report($"Downloading Stockfish {version}...");
 
@@ -60,10 +59,9 @@ public class StockfishDownloader : IStockfishDownloader
         Directory.CreateDirectory(tempDir);
 
         var zipPath = Path.Combine(tempDir, "stockfish.zip");
-        var url = version == "master" ? MasterZipUrl : (await GetLatestReleaseAsync())?.Url ?? MasterZipUrl;
+        var url = version == "master" ? MasterZipUrl : (await GetLatestReleaseAsync(cancellationToken))?.Url ?? MasterZipUrl;
 
-        EnsureUserAgent();
-        await SafeDownloadToFileAsync(url, zipPath, progress);
+        await SafeDownloadToFileAsync(url, zipPath, progress, cancellationToken);
 
         progress?.Report("Extracting source code...");
         SafeExtractToDirectory(zipPath, tempDir);
@@ -86,7 +84,7 @@ public class StockfishDownloader : IStockfishDownloader
         };
     }
 
-    public async Task<bool> DownloadNeuralNetworkAsync(string sourceDirectory, BuildConfiguration? config = null, IProgress<string>? progress = null)
+    public async Task<bool> DownloadNeuralNetworkAsync(string sourceDirectory, BuildConfiguration? config = null, IProgress<string>? progress = null, CancellationToken cancellationToken = default)
     {
         progress?.Report("Preparing NNUE neural networks...");
 
@@ -104,7 +102,7 @@ public class StockfishDownloader : IStockfishDownloader
             var destination = Path.Combine(sourceDirectory, networkFile);
             if (File.Exists(destination))
             {
-                if (await ValidateNetworkFileAsync(destination, networkFile))
+                if (await ValidateNetworkFileAsync(destination, networkFile, cancellationToken))
                 {
                     progress?.Report($"{networkFile} already present and validated.");
                     continue;
@@ -120,12 +118,11 @@ public class StockfishDownloader : IStockfishDownloader
                 try
                 {
                     progress?.Report($"Downloading {networkFile} from {url}...");
-                    EnsureUserAgent();
                     
                     var tempNetPath = destination + ".tmp";
-                    await SafeDownloadToFileAsync(url, tempNetPath, progress);
+                    await SafeDownloadToFileAsync(url, tempNetPath, progress, cancellationToken);
 
-                    if (!await ValidateNetworkFileAsync(tempNetPath, networkFile))
+                    if (!await ValidateNetworkFileAsync(tempNetPath, networkFile, cancellationToken))
                     {
                         progress?.Report($"Downloaded {networkFile} from {url} failed validation.");
                         File.Delete(tempNetPath);
@@ -154,25 +151,25 @@ public class StockfishDownloader : IStockfishDownloader
         return overallSuccess;
     }
 
-    private async Task SafeDownloadToFileAsync(string url, string destinationPath, IProgress<string>? progress)
+    private async Task SafeDownloadToFileAsync(string url, string destinationPath, IProgress<string>? progress, CancellationToken cancellationToken)
     {
-        using var response = await _httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead);
+        using var response = await _httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
         response.EnsureSuccessStatusCode();
 
         var totalBytes = response.Content.Headers.ContentLength ?? -1L;
         if (totalBytes > MaxDownloadSize)
             throw new InvalidOperationException($"Download too large: {totalBytes} bytes");
 
-        using var stream = await response.Content.ReadAsStreamAsync();
+        using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
         using var fileStream = new FileStream(destinationPath, FileMode.Create, FileAccess.Write, FileShare.None, 8192, true);
 
         var buffer = new byte[8192];
         long totalRead = 0;
         int bytesRead;
 
-        while ((bytesRead = await stream.ReadAsync(buffer)) != 0)
+        while ((bytesRead = await stream.ReadAsync(buffer, cancellationToken)) != 0)
         {
-            await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead));
+            await fileStream.WriteAsync(buffer.AsMemory(0, bytesRead), cancellationToken);
             totalRead += bytesRead;
 
             if (totalRead > MaxDownloadSize)
@@ -204,126 +201,6 @@ public class StockfishDownloader : IStockfishDownloader
         }
     }
 
-    private static string FindMakeCommand(BuildConfiguration? config)
-    {
-        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            return "make";
-
-        if (config?.SelectedCompiler?.Path != null)
-        {
-            var compilerPath = new DirectoryInfo(config.SelectedCompiler.Path);
-            var msys2Root = compilerPath.Parent?.Parent;
-            
-            if (msys2Root != null && msys2Root.Exists)
-            {
-                var makePaths = new[]
-                {
-                    Path.Combine(msys2Root.FullName, "usr", "bin", "make.exe"),
-                    Path.Combine(msys2Root.FullName, "mingw64", "bin", "make.exe"),
-                    Path.Combine(msys2Root.FullName, "mingw64", "bin", "mingw32-make.exe")
-                };
-
-                foreach (var makePath in makePaths)
-                {
-                    if (File.Exists(makePath))
-                        return makePath;
-                }
-            }
-        }
-
-        var commonMsys2Paths = new[]
-        {
-            @"C:\msys64",
-            @"C:\msys2",
-            @"D:\msys64",
-            @"D:\msys2"
-        };
-
-        foreach (var msys2Path in commonMsys2Paths)
-        {
-            var makePaths = new[]
-            {
-                Path.Combine(msys2Path, "usr", "bin", "make.exe"),
-                Path.Combine(msys2Path, "mingw64", "bin", "make.exe"),
-                Path.Combine(msys2Path, "mingw64", "bin", "mingw32-make.exe")
-            };
-
-            foreach (var makePath in makePaths)
-            {
-                if (File.Exists(makePath))
-                    return makePath;
-            }
-        }
-
-        return "make";
-    }
-
-    private static Dictionary<string, string> PrepareEnvironment(BuildConfiguration? config)
-    {
-        var env = new Dictionary<string, string>();
-        foreach (System.Collections.DictionaryEntry entry in Environment.GetEnvironmentVariables())
-        {
-            if (entry.Key != null && entry.Value != null)
-                env[entry.Key.ToString()!] = entry.Value.ToString()!;
-        }
-
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-        {
-            var pathsToAdd = new List<string>();
-
-            if (config?.SelectedCompiler?.Path != null)
-            {
-                var compilerPath = new DirectoryInfo(config.SelectedCompiler.Path);
-                var msys2Root = compilerPath.Parent?.Parent;
-                
-                if (msys2Root != null && msys2Root.Exists)
-                {
-                    var usrBin = Path.Combine(msys2Root.FullName, "usr", "bin");
-                    var mingw64Bin = Path.Combine(msys2Root.FullName, "mingw64", "bin");
-                    
-                    if (Directory.Exists(usrBin))
-                        pathsToAdd.Add(usrBin);
-                    if (Directory.Exists(mingw64Bin))
-                        pathsToAdd.Add(mingw64Bin);
-                }
-            }
-            else
-            {
-                var commonMsys2Paths = new[]
-                {
-                    @"C:\msys64",
-                    @"C:\msys2",
-                    @"D:\msys64",
-                    @"D:\msys2"
-                };
-
-                foreach (var msys2Path in commonMsys2Paths)
-                {
-                    if (Directory.Exists(msys2Path))
-                    {
-                        var usrBin = Path.Combine(msys2Path, "usr", "bin");
-                        var mingw64Bin = Path.Combine(msys2Path, "mingw64", "bin");
-                        
-                        if (Directory.Exists(usrBin))
-                            pathsToAdd.Add(usrBin);
-                        if (Directory.Exists(mingw64Bin))
-                            pathsToAdd.Add(mingw64Bin);
-                            
-                        break;
-                    }
-                }
-            }
-
-            if (pathsToAdd.Count > 0)
-            {
-                var currentPath = env.GetValueOrDefault("PATH", string.Empty);
-                env["PATH"] = string.Join(";", pathsToAdd) + ";" + currentPath;
-            }
-        }
-
-        return env;
-    }
-
     private static List<string> DetectNetworkFileNames(string sourceDirectory)
     {
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -349,7 +226,7 @@ public class StockfishDownloader : IStockfishDownloader
         return names.ToList();
     }
 
-    private static async Task<bool> ValidateNetworkFileAsync(string filePath, string fileName)
+    private static async Task<bool> ValidateNetworkFileAsync(string filePath, string fileName, CancellationToken cancellationToken = default)
     {
         var info = new FileInfo(filePath);
         if (!info.Exists || info.Length < 1_000_000)
@@ -363,7 +240,7 @@ public class StockfishDownloader : IStockfishDownloader
 
         using var sha256 = SHA256.Create();
         await using var stream = File.OpenRead(filePath);
-        var hash = Convert.ToHexString(await sha256.ComputeHashAsync(stream)).ToLowerInvariant();
+        var hash = Convert.ToHexString(await sha256.ComputeHashAsync(stream, cancellationToken)).ToLowerInvariant();
         return hash.StartsWith(expectedPrefix, StringComparison.Ordinal);
     }
 

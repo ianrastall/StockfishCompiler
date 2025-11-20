@@ -84,6 +84,10 @@ public class ArchitectureDetector : IArchitectureDetector
             CreateNoWindow = true
         };
 
+        // Force C (English) locale to ensure output parsing works on non-English systems
+        psi.EnvironmentVariables["LC_ALL"] = "C";
+        psi.EnvironmentVariables["LANG"] = "C";
+
         SetupEnvironmentForMSYS2(psi, compiler.Path);
 
         using var process = Process.Start(psi);
@@ -155,6 +159,10 @@ public class ArchitectureDetector : IArchitectureDetector
             UseShellExecute = false,
             CreateNoWindow = true
         };
+
+        // Force C (English) locale to ensure output parsing works on non-English systems
+        psi.EnvironmentVariables["LC_ALL"] = "C";
+        psi.EnvironmentVariables["LANG"] = "C";
 
         SetupEnvironmentForMSYS2(psi, compiler.Path);
 

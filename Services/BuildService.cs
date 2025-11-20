@@ -4,9 +4,11 @@ using System.Linq;
 using System.Reactive.Linq;
 using System.Reactive.Subjects;
 using System.Runtime.InteropServices;
-using System.Security; // for SecurityException
+using System.Security;
 using System.Text;
 using System.Text.RegularExpressions;
+using StockfishCompiler.Constants;
+using StockfishCompiler.Helpers;
 using StockfishCompiler.Models;
 
 namespace StockfishCompiler.Services;
@@ -35,16 +37,17 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
         try
         {
             var progress = new Progress<string>(msg => _outputSubject.OnNext(msg));
+            var token = _cts.Token;
 
             // Download source
             _outputSubject.OnNext("Downloading Stockfish source...");
-            downloadResult = await downloader.DownloadSourceAsync(configuration.SourceVersion, progress);
+            downloadResult = await downloader.DownloadSourceAsync(configuration.SourceVersion, progress, token);
             var sourceDir = downloadResult.SourceDirectory;
             _progressSubject.OnNext(25);
 
             if (configuration.DownloadNetwork)
             {
-                var networkReady = await downloader.DownloadNeuralNetworkAsync(sourceDir, configuration, progress);
+                var networkReady = await downloader.DownloadNeuralNetworkAsync(sourceDir, configuration, progress, token);
                 if (!networkReady)
                     _outputSubject.OnNext("Pre-download failed - make will attempt to fetch the network.");
                 _progressSubject.OnNext(networkReady ? 40 : 30);
@@ -59,19 +62,23 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
             if (CreatePlaceholderNetwork(sourceDir))
                 _outputSubject.OnNext("Created placeholder network file for LTO linking.");
 
-            // Verify neural network files are in place
-            VerifyNetworkFiles(sourceDir);
+            // Verify neural network files are in place and decide build strategy
+            var canUsePGO = VerifyNetworkFilesForPGO(sourceDir);
+            var buildTarget = canUsePGO ? "profile-build" : "build";
+            
+            if (!canUsePGO)
+                _outputSubject.OnNext("Warning: Valid neural network not found. Using standard build instead of PGO.");
 
             // Compile
-            _outputSubject.OnNext("Compiling Stockfish...");
-            var result = await CompileStockfishAsync(sourceDir, configuration, _cts.Token);
+            _outputSubject.OnNext($"Compiling Stockfish using '{buildTarget}' target...");
+            var result = await CompileStockfishAsync(sourceDir, configuration, token, buildTarget);
             _progressSubject.OnNext(90);
 
             // Strip and copy
             if (result.Success && configuration.StripExecutable)
             {
                 _outputSubject.OnNext("Stripping executable...");
-                await StripExecutableAsync(sourceDir, configuration, _cts.Token);
+                await StripExecutableAsync(sourceDir, configuration, token);
             }
 
             if (result.Success)
@@ -96,20 +103,19 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
 
     public void CancelBuild() => _cts?.Cancel();
 
-    private async Task<CompilationResult> CompileStockfishAsync(string sourcePath, BuildConfiguration config, CancellationToken token)
+    private async Task<CompilationResult> CompileStockfishAsync(string sourcePath, BuildConfiguration config, CancellationToken token, string buildTarget = BuildTargets.ProfileBuild)
     {
         var safeArch = SanitizeArchitecture(config.SelectedArchitecture?.Id);
         var safeJobs = SanitizeParallelJobs(config.ParallelJobs);
         var compType = GetCompType(config);
-        var makeCmd = FindMakeCommand(config);
-        var env = PrepareEnvironment(config);
+        var makeCmd = MSYS2Helper.FindMakeExecutable(config.SelectedCompiler?.Path);
+        var env = MSYS2Helper.SetupEnvironment(config);
 
         // Ensure PGO profile data lands in a short, writable path to avoid GCOV path explosions on Windows
-        var profileDir = Path.Combine(Path.GetTempPath(), "sf_prof");
+        // Use unique directory per build to avoid conflicts between concurrent builds
+        var profileDir = Path.Combine(Path.GetTempPath(), $"sf_prof_{Guid.NewGuid():N}");
         try
         {
-            if (Directory.Exists(profileDir))
-                Directory.Delete(profileDir, true);
             Directory.CreateDirectory(profileDir);
             env["PROFDIR"] = profileDir;
             env["GCOV_PREFIX"] = profileDir;
@@ -122,7 +128,7 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
         }
 
         _outputSubject.OnNext($"Using make: {makeCmd}");
-        _outputSubject.OnNext($"Config: Jobs={safeJobs}, Arch={safeArch}, Comp={compType}");
+        _outputSubject.OnNext($"Config: Jobs={safeJobs}, Arch={safeArch}, Comp={compType}, Target={buildTarget}");
 
         using var process = new Process
         {
@@ -138,7 +144,7 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
         };
 
         process.StartInfo.ArgumentList.Add($"-j{safeJobs}");
-        process.StartInfo.ArgumentList.Add("profile-build");
+        process.StartInfo.ArgumentList.Add(buildTarget);
         process.StartInfo.ArgumentList.Add($"ARCH={safeArch}");
         process.StartInfo.ArgumentList.Add($"COMP={compType}");
 
@@ -196,8 +202,8 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
 
     private async Task StripExecutableAsync(string sourcePath, BuildConfiguration config, CancellationToken token)
     {
-        var makeCmd = FindMakeCommand(config);
-        var env = PrepareEnvironment(config);
+        var makeCmd = MSYS2Helper.FindMakeExecutable(config.SelectedCompiler?.Path);
+        var env = MSYS2Helper.SetupEnvironment(config);
 
         using var process = new Process
         {
@@ -236,70 +242,53 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
 
     private static string GetCompType(BuildConfiguration config)
     {
-        if (config.SelectedCompiler == null) return "gcc";
-        return RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && config.SelectedCompiler.Type == "gcc" ? "mingw" : config.SelectedCompiler.Type;
-    }
-
-    private static string FindMakeCommand(BuildConfiguration config)
-    {
-        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            return "make";
-        if (config.SelectedCompiler?.Path != null)
-        {
-            var compilerPath = new DirectoryInfo(config.SelectedCompiler.Path);
-            var msys2Root = compilerPath.Parent?.Parent;
-            if (msys2Root != null && msys2Root.Exists)
-            {
-                var makePaths = new[]
-                {
-                    Path.Combine(msys2Root.FullName, "usr", "bin", "make.exe"),
-                    Path.Combine(msys2Root.FullName, "mingw64", "bin", "mingw32-make.exe"),
-                    Path.Combine(msys2Root.FullName, "mingw64", "bin", "make.exe")
-                };
-                foreach (var makePath in makePaths)
-                    if (File.Exists(makePath)) return makePath;
-            }
-        }
-        var commonMsys2Paths = new[] { @"C:\msys64", @"C:\msys2", @"D:\msys64", @"D:\msys2" };
-        foreach (var msys2Path in commonMsys2Paths)
-        {
-            var makePaths = new[]
-            {
-                Path.Combine(msys2Path, "usr", "bin", "make.exe"),
-                Path.Combine(msys2Path, "mingw64", "bin", "mingw32-make.exe"),
-                Path.Combine(msys2Path, "mingw64", "bin", "make.exe")
-            };
-            foreach (var makePath in makePaths)
-                if (File.Exists(makePath)) return makePath;
-        }
-        return "make";
+        if (config.SelectedCompiler == null) return CompilerType.GCC;
+        return RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && config.SelectedCompiler.Type == CompilerType.GCC 
+            ? CompilerType.MinGW 
+            : config.SelectedCompiler.Type;
     }
 
     private static bool DisableNetDependency(string sourceDirectory)
     {
         var makefilePath = Path.Combine(sourceDirectory, "Makefile");
         if (!File.Exists(makefilePath)) return false;
-        var lines = File.ReadAllLines(makefilePath);
-        var changed = false;
-        var targetsToPatch = new[] { "profile-build:", "build:", "config-sanity:", "analyze:" };
-        for (int i = 0; i < lines.Length; i++)
+        
+        var content = File.ReadAllText(makefilePath);
+        var originalContent = content;
+        
+        var targetsToPatch = new[] 
+        { 
+            BuildTargets.ProfileBuild, 
+            BuildTargets.Build, 
+            BuildTargets.ConfigSanity, 
+            BuildTargets.Analyze 
+        };
+        
+        foreach (var target in targetsToPatch)
         {
-            foreach (var target in targetsToPatch)
+            var pattern = $@"^(\s*{Regex.Escape(target)}:\s*)([^\r\n]*)";
+            var regex = new Regex(pattern, RegexOptions.Multiline);
+            
+            content = regex.Replace(content, match =>
             {
-                if (lines[i].StartsWith(target, StringComparison.Ordinal))
-                {
-                    var updated = RemoveMakeDependency(lines[i], "net");
-                    if (!string.Equals(updated, lines[i], StringComparison.Ordinal))
-                    {
-                        lines[i] = updated;
-                        changed = true;
-                    }
-                    break;
-                }
-            }
+                var prefix = match.Groups[1].Value;
+                var dependencies = match.Groups[2].Value;
+                
+                var tokens = dependencies.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                var filtered = tokens.Where(t => !t.Equals(BuildTargets.Net, StringComparison.Ordinal));
+                var newDeps = filtered.Any() ? " " + string.Join(' ', filtered) : string.Empty;
+                
+                return prefix + newDeps;
+            });
         }
-        if (changed) File.WriteAllLines(makefilePath, lines);
-        return changed;
+        
+        if (content != originalContent)
+        {
+            File.WriteAllText(makefilePath, content);
+            return true;
+        }
+        
+        return false;
     }
 
     private bool NeutralizeNetScript(string rootDirectory)
@@ -399,16 +388,31 @@ exit 0
         return names.ToList();
     }
 
-    private void VerifyNetworkFiles(string sourceDirectory)
+    private bool VerifyNetworkFilesForPGO(string sourceDirectory)
     {
         var nnueFiles = Directory.GetFiles(sourceDirectory, "*.nnue");
-        if (nnueFiles.Length > 0)
+        
+        if (nnueFiles.Length == 0)
         {
-            _outputSubject.OnNext($"Network files present: {string.Join(", ", nnueFiles.Select(Path.GetFileName))}");
+            _outputSubject.OnNext("No neural network files found.");
+            return false;
+        }
+
+        // Check if we have at least one valid (non-tiny) network file
+        // The placeholder is only 1KB, real networks are several MB
+        const long MinValidNetworkSize = 100_000; // 100KB minimum
+        
+        var validNetworks = nnueFiles.Where(f => new FileInfo(f).Length >= MinValidNetworkSize).ToArray();
+        
+        if (validNetworks.Length > 0)
+        {
+            _outputSubject.OnNext($"Valid network files for PGO: {string.Join(", ", validNetworks.Select(Path.GetFileName))}");
+            return true;
         }
         else
         {
-            _outputSubject.OnNext("Warning: No .nnue files found in source directory!");
+            _outputSubject.OnNext($"Network files present but too small (placeholders only): {string.Join(", ", nnueFiles.Select(Path.GetFileName))}");
+            return false;
         }
     }
 
@@ -443,71 +447,6 @@ exit 0
             _outputSubject.OnNext($"Warning: Temp directory persists: {tempDirectory}");
     }
 
-    private static string RemoveMakeDependency(string line, string dependency)
-    {
-        var colonIndex = line.IndexOf(':');
-        if (colonIndex < 0) return line;
-        var targetPart = line[..(colonIndex + 1)];
-        var rest = line[(colonIndex + 1)..];
-        var tokens = rest.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
-        var filtered = tokens.Where(t => !t.Equals(dependency, StringComparison.Ordinal)).ToArray();
-        var newRest = filtered.Length > 0 ? " " + string.Join(' ', filtered) : string.Empty;
-        var updatedLine = targetPart + newRest;
-        return updatedLine == line ? line : updatedLine;
-    }
-
-    private static Dictionary<string, string> PrepareEnvironment(BuildConfiguration config)
-    {
-        var env = new Dictionary<string, string>();
-        foreach (System.Collections.DictionaryEntry entry in Environment.GetEnvironmentVariables())
-            if (entry.Key != null && entry.Value != null)
-                env[entry.Key.ToString()!] = entry.Value.ToString()!;
-        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows)) return env;
-        var pathsToAdd = new List<string>();
-        if (config.SelectedCompiler?.Path != null)
-        {
-            pathsToAdd.Add(config.SelectedCompiler.Path);
-            var compilerPath = new DirectoryInfo(config.SelectedCompiler.Path);
-            var msys2Root = compilerPath.Parent?.Parent;
-            if (msys2Root != null && msys2Root.Exists)
-            {
-                var usrBin = Path.Combine(msys2Root.FullName, "usr", "bin");
-                var mingw64Bin = Path.Combine(msys2Root.FullName, "mingw64", "bin");
-                if (Directory.Exists(usrBin)) pathsToAdd.Add(usrBin);
-                if (Directory.Exists(mingw64Bin)) pathsToAdd.Add(mingw64Bin);
-            }
-        }
-        else
-        {
-            var commonMsys2Paths = new[] { @"C:\msys64", @"C:\msys2", @"D:\msys64", @"D:\msys2" };
-            foreach (var msys2Path in commonMsys2Paths)
-            {
-                if (!Directory.Exists(msys2Path)) continue;
-                var usrBin = Path.Combine(msys2Path, "usr", "bin");
-                var mingw64Bin = Path.Combine(msys2Path, "mingw64", "bin");
-                if (Directory.Exists(usrBin)) pathsToAdd.Add(usrBin);
-                if (Directory.Exists(mingw64Bin)) pathsToAdd.Add(mingw64Bin);
-                if (pathsToAdd.Count > 0) break;
-            }
-        }
-        if (pathsToAdd.Count > 0)
-        {
-            var currentPath = env.GetValueOrDefault("PATH", string.Empty);
-            env["PATH"] = string.Join(";", pathsToAdd) + ";" + currentPath;
-        }
-        return env;
-    }
-
-    private static string SanitizeArchitecture(string? arch)
-    {
-        if (string.IsNullOrWhiteSpace(arch)) return "x86-64";
-        var validArchs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
-        {
-            "x86-64","x86-64-vnni512","x86-64-vnni256","x86-64-avx512","x86-64-bmi2","x86-64-avx2","x86-64-sse41-popcnt","x86-64-ssse3","x86-64-sse3-popcnt","armv8","apple-silicon"
-        };
-        return validArchs.Contains(arch) ? arch : "x86-64";
-    }
-
     private static int SanitizeParallelJobs(int jobs)
     {
         var max = Environment.ProcessorCount * 2;
@@ -516,19 +455,44 @@ exit 0
         return jobs;
     }
 
+    private static string SanitizeArchitecture(string? arch)
+    {
+        if (string.IsNullOrWhiteSpace(arch)) return Architectures.X86_64;
+        
+        var validArchs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            Architectures.X86_64,
+            Architectures.X86_64_VNNI512,
+            Architectures.X86_64_VNNI256,
+            Architectures.X86_64_AVX512,
+            Architectures.X86_64_BMI2,
+            Architectures.X86_64_AVX2,
+            Architectures.X86_64_SSE41_POPCNT,
+            Architectures.X86_64_SSSE3,
+            Architectures.X86_64_SSE3_POPCNT,
+            Architectures.ARMV8,
+            Architectures.APPLE_SILICON
+        };
+        
+        return validArchs.Contains(arch) ? arch : Architectures.X86_64;
+    }
+
     private static string ValidateOutputPath(string outputDirectory, string filename)
     {
-        if (string.IsNullOrWhiteSpace(outputDirectory)) throw new SecurityException("Output directory not specified");
+        if (string.IsNullOrWhiteSpace(outputDirectory)) 
+            throw new SecurityException("Output directory not specified");
 
         var baseName = Path.GetFileName(filename);
-        if (!string.Equals(baseName, filename, StringComparison.Ordinal)) throw new SecurityException("Invalid output file name");
-        if (baseName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) throw new SecurityException("Invalid characters in output file name");
+        if (!string.Equals(baseName, filename, StringComparison.Ordinal)) 
+            throw new SecurityException("Invalid output file name");
+        if (baseName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) 
+            throw new SecurityException("Invalid characters in output file name");
 
         var ext = Path.GetExtension(baseName);
         if (!string.IsNullOrEmpty(ext) && !ext.Equals(".exe", StringComparison.OrdinalIgnoreCase))
             throw new SecurityException("Disallowed file extension");
 
-        var normalizedDir = Path.GetFullPath(outputDirectory);
+        var baseDir = new DirectoryInfo(Path.GetFullPath(outputDirectory));
         var systemDirs = new[]
         {
             Environment.GetFolderPath(Environment.SpecialFolder.System),
@@ -536,12 +500,19 @@ exit 0
             Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
             Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86)
         };
-        if (systemDirs.Any(d => !string.IsNullOrEmpty(d) && normalizedDir.StartsWith(d, StringComparison.OrdinalIgnoreCase)))
+        
+        if (systemDirs.Any(d => !string.IsNullOrEmpty(d) && baseDir.FullName.StartsWith(d, StringComparison.OrdinalIgnoreCase)))
             throw new SecurityException("Refusing to write into system directory");
 
-        Directory.CreateDirectory(normalizedDir);
-        var fullPath = Path.GetFullPath(Path.Combine(normalizedDir, baseName));
-        if (!fullPath.StartsWith(normalizedDir, StringComparison.OrdinalIgnoreCase)) throw new SecurityException("Path traversal detected");
+        Directory.CreateDirectory(baseDir.FullName);
+        
+        var fullPath = Path.GetFullPath(Path.Combine(baseDir.FullName, baseName));
+        var targetFile = new FileInfo(fullPath);
+        
+        // Improved path traversal check using canonicalized paths
+        if (targetFile.DirectoryName == null || !targetFile.DirectoryName.StartsWith(baseDir.FullName, StringComparison.OrdinalIgnoreCase))
+            throw new SecurityException("Path traversal detected");
+            
         return fullPath;
     }
 

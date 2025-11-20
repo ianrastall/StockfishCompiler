@@ -86,7 +86,7 @@ public class CompilerInstallerService(ILogger<CompilerInstallerService> logger, 
             progress?.Report("Download complete. Starting installation...");
 
             // Run the installer silently
-            var installArgs = $"install --root {installPath} --confirm-command";
+            var installArgs = $"install --root \"{installPath}\" --confirm-command";
             
             var startInfo = new ProcessStartInfo
             {
@@ -105,7 +105,19 @@ public class CompilerInstallerService(ILogger<CompilerInstallerService> logger, 
                 return (false, string.Empty);
             }
 
-            await process.WaitForExitAsync();
+            // Add timeout to prevent indefinite hangs
+            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(30));
+            try
+            {
+                await process.WaitForExitAsync(cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                logger.LogError("MSYS2 installation timed out after 30 minutes");
+                progress?.Report("Installation timed out. Please try installing MSYS2 manually.");
+                try { process.Kill(true); } catch { }
+                return (false, string.Empty);
+            }
 
             if (process.ExitCode != 0)
             {
@@ -179,7 +191,18 @@ public class CompilerInstallerService(ILogger<CompilerInstallerService> logger, 
                 using var process = Process.Start(startInfo);
                 if (process == null) continue;
 
-                await process.WaitForExitAsync();
+                // Add timeout for each package installation
+                using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(15));
+                try
+                {
+                    await process.WaitForExitAsync(cts.Token);
+                }
+                catch (OperationCanceledException)
+                {
+                    logger.LogWarning("Package installation command timed out: {Command}", command);
+                    try { process.Kill(true); } catch { }
+                    continue;
+                }
                 
                 if (process.ExitCode != 0)
                 {

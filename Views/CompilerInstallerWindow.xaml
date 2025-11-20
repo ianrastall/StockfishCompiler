@@ -8,13 +8,8 @@
         Height="400" 
         Width="600"
         WindowStartupLocation="CenterOwner"
-        ResizeMode="NoResize">
-
-    <Window.Resources>
-        <Style TargetType="Window">
-            <Setter Property="Background" Value="#1e1e1e"/>
-        </Style>
-    </Window.Resources>
+        ResizeMode="NoResize"
+        Background="{DynamicResource BackgroundBrush}">
 
     <Grid Margin="20">
         <Grid.RowDefinitions>
@@ -28,12 +23,12 @@
                    Text="No C++ Compiler Found" 
                    FontSize="24" 
                    FontWeight="Bold" 
-                   Foreground="White"
+                   Foreground="{DynamicResource ForegroundBrush}"
                    Margin="0,0,0,10"/>
 
         <TextBlock Grid.Row="1" 
                    TextWrapping="Wrap"
-                   Foreground="#cccccc"
+                   Foreground="{DynamicResource ForegroundMutedBrush}"
                    Margin="0,0,0,20">
             <Run Text="To compile Stockfish, you need a C++ compiler. "/>
             <Run Text="We can automatically install MSYS2 with GCC for you."/>
@@ -52,14 +47,11 @@
                       VerticalScrollBarVisibility="Auto"
                       Margin="0,0,0,20">
             <TextBox x:Name="LogTextBox"
+                     Style="{StaticResource DarkTextBox}"
                      IsReadOnly="True"
-                     Background="#2d2d30"
-                     Foreground="#cccccc"
                      FontFamily="Consolas"
-                     BorderThickness="1"
-                     BorderBrush="#555555"
-                     Padding="10"
-                     TextWrapping="Wrap"/>
+                     TextWrapping="Wrap"
+                     AcceptsReturn="True"/>
         </ScrollViewer>
 
         <Grid Grid.Row="3">
@@ -73,6 +65,7 @@
                          Grid.Column="0"
                          Height="25"
                          Margin="0,0,10,0"
+                         Style="{StaticResource DarkProgressBar}"
                          Visibility="Collapsed"/>
 
             <Button x:Name="InstallButton"
@@ -81,8 +74,7 @@
                     Width="120"
                     Height="30"
                     Margin="0,0,10,0"
-                    Background="#007ACC"
-                    Foreground="White"
+                    Style="{StaticResource DarkButton}"
                     Click="InstallButton_Click"/>
 
             <Button x:Name="CancelButton"
@@ -90,8 +82,7 @@
                     Content="Cancel"
                     Width="80"
                     Height="30"
-                    Background="#555555"
-                    Foreground="White"
+                    Style="{StaticResource DarkButton}"
                     Click="CancelButton_Click"/>
         </Grid>
     </Grid>

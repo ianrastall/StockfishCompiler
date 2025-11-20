@@ -49,20 +49,28 @@ namespace StockfishCompiler
                     builder.SetMinimumLevel(LogLevel.Debug);
                 });
 
-                // Basic HttpClient registration (no factory extensions available)
-                services.AddSingleton<HttpClient>();
+                // Configure HttpClient properly with timeout and user agent
+                services.AddSingleton<HttpClient>(sp =>
+                {
+                    var client = new HttpClient
+                    {
+                        Timeout = TimeSpan.FromMinutes(10)
+                    };
+                    client.DefaultRequestHeaders.UserAgent.ParseAdd("StockfishCompiler/1.0");
+                    return client;
+                });
                 services.AddSingleton<IStockfishDownloader, StockfishDownloader>();
 
                 // Services
                 services.AddSingleton<ICompilerService, CompilerService>();
                 services.AddSingleton<ICompilerInstallerService, CompilerInstallerService>();
                 services.AddSingleton<IArchitectureDetector, ArchitectureDetector>();
-                services.AddSingleton<IBuildService, BuildService>();
+                services.AddTransient<IBuildService, BuildService>(); // Changed to Transient to avoid state corruption
                 services.AddSingleton<IUserSettingsService, UserSettingsService>();
 
                 // ViewModels
                 services.AddSingleton<MainViewModel>();
-                services.AddSingleton<BuildViewModel>();
+                services.AddTransient<BuildViewModel>(); // Changed to Transient since BuildService is now Transient
 
                 Services = services.BuildServiceProvider();
 
