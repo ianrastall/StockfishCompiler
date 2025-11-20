@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
+using System.Security.Cryptography;
 using Microsoft.Extensions.Logging;
 
 namespace StockfishCompiler.Services;
@@ -15,7 +16,10 @@ public interface ICompilerInstallerService
 
 public class CompilerInstallerService(ILogger<CompilerInstallerService> logger, HttpClient httpClient) : ICompilerInstallerService
 {
-    private const string MSYS2_INSTALLER_URL = "https://github.com/msys2/msys2-installer/releases/latest/download/msys2-x86_64-latest.exe";
+    // Use a specific version with known hash for security
+    // Update these when upgrading MSYS2 version
+    private const string MSYS2_INSTALLER_URL = "https://github.com/msys2/msys2-installer/releases/download/2024-01-13/msys2-x86_64-20240113.exe";
+    private const string MSYS2_INSTALLER_SHA256 = "a24ca2f57c21c0f16d5d2e5e80f0ac94bdadad48f06cc11f06cb9e7526f18a66";
     private const string DEFAULT_INSTALL_PATH = @"C:\msys64";
     
     public Task<bool> IsMSYS2InstalledAsync()
@@ -83,7 +87,21 @@ public class CompilerInstallerService(ILogger<CompilerInstallerService> logger, 
                 await stream.CopyToAsync(fileStream);
             }
 
-            progress?.Report("Download complete. Starting installation...");
+            // Verify SHA256 checksum for security
+            progress?.Report("Verifying installer integrity...");
+            logger.LogInformation("Verifying SHA256 checksum of downloaded installer");
+            
+            if (!await VerifyFileHashAsync(tempPath, MSYS2_INSTALLER_SHA256))
+            {
+                logger.LogError("MSYS2 installer hash mismatch! Expected: {Expected}", MSYS2_INSTALLER_SHA256);
+                progress?.Report("ERROR: Installer integrity check failed! The downloaded file may be corrupted or tampered with.");
+                
+                try { File.Delete(tempPath); } catch { }
+                return (false, string.Empty);
+            }
+            
+            logger.LogInformation("Installer checksum verified successfully");
+            progress?.Report("Installer verified. Starting installation...");
 
             // Run the installer silently
             var installArgs = $"install --root \"{installPath}\" --confirm-command";
@@ -142,6 +160,24 @@ public class CompilerInstallerService(ILogger<CompilerInstallerService> logger, 
             logger.LogError(ex, "Failed to install MSYS2");
             progress?.Report($"Installation error: {ex.Message}");
             return (false, string.Empty);
+        }
+    }
+
+    private static async Task<bool> VerifyFileHashAsync(string filePath, string expectedHash)
+    {
+        try
+        {
+            using var sha256 = SHA256.Create();
+            using var stream = File.OpenRead(filePath);
+            var hashBytes = await sha256.ComputeHashAsync(stream);
+            var actualHash = Convert.ToHexString(hashBytes).ToLowerInvariant();
+            var expected = expectedHash.ToLowerInvariant();
+            
+            return actualHash == expected;
+        }
+        catch (Exception)
+        {
+            return false;
         }
     }
 

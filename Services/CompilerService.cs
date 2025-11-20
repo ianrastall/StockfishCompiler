@@ -80,50 +80,64 @@ public class CompilerService(ILogger<CompilerService> logger) : ICompilerService
     private async Task<List<CompilerInfo>> DetectMSYS2CompilersAsync()
     {
         logger.LogInformation("Searching for MSYS2 installations");
+        
+        // Wrap drive scanning in Task.Run to avoid UI freeze on network/sleeping drives
+        var possiblePaths = await Task.Run(() =>
+        {
+            var paths = new List<string>();
+            
+            try
+            {
+                // Search common locations across all drives
+                var drives = DriveInfo.GetDrives()
+                    .Where(d => d.DriveType == DriveType.Fixed && d.IsReady)
+                    .Select(d => d.Name.TrimEnd('\\'))
+                    .ToList();
+
+                logger.LogInformation("Searching drives: {Drives}", string.Join(", ", drives));
+
+                foreach (var drive in drives)
+                {
+                    // Add root level msys2/msys64 paths
+                    paths.Add(Path.Combine(drive, "msys64"));
+                    paths.Add(Path.Combine(drive, "msys2"));
+                    
+                    // Check Program Files
+                    paths.Add(Path.Combine(drive, "Program Files", "msys64"));
+                    paths.Add(Path.Combine(drive, "Program Files", "msys2"));
+                    
+                    // Check tools directories
+                    paths.Add(Path.Combine(drive, "tools", "msys64"));
+                    paths.Add(Path.Combine(drive, "tools", "msys2"));
+                }
+
+                // Add user profile paths
+                paths.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "msys64"));
+                paths.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "msys2"));
+                paths.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "msys64"));
+                paths.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "msys2"));
+
+                // Check environment variable
+                var msysEnvVar = Environment.GetEnvironmentVariable("MSYS2_PATH");
+                if (!string.IsNullOrEmpty(msysEnvVar))
+                {
+                    paths.Add(msysEnvVar);
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Error scanning drives for MSYS2");
+            }
+            
+            // Remove duplicates and check which paths exist
+            return paths.Distinct(StringComparer.OrdinalIgnoreCase)
+                       .Where(Directory.Exists)
+                       .ToList();
+        });
+
         List<CompilerInfo> compilers = [];
         
-        // Search common locations across all drives
-        var drives = DriveInfo.GetDrives()
-            .Where(d => d.DriveType == DriveType.Fixed && d.IsReady)
-            .Select(d => d.Name.TrimEnd('\\'))
-            .ToList();
-
-        logger.LogInformation("Searching drives: {Drives}", string.Join(", ", drives));
-
-        var possiblePaths = new List<string>();
-        
-        foreach (var drive in drives)
-        {
-            // Add root level msys2/msys64 paths
-            possiblePaths.Add(Path.Combine(drive, "msys64"));
-            possiblePaths.Add(Path.Combine(drive, "msys2"));
-            
-            // Check Program Files
-            possiblePaths.Add(Path.Combine(drive, "Program Files", "msys64"));
-            possiblePaths.Add(Path.Combine(drive, "Program Files", "msys2"));
-            
-            // Check tools directories
-            possiblePaths.Add(Path.Combine(drive, "tools", "msys64"));
-            possiblePaths.Add(Path.Combine(drive, "tools", "msys2"));
-        }
-
-        // Add user profile paths
-        possiblePaths.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "msys64"));
-        possiblePaths.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "msys2"));
-        possiblePaths.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "msys64"));
-        possiblePaths.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "msys2"));
-
-        // Check environment variable
-        var msysEnvVar = Environment.GetEnvironmentVariable("MSYS2_PATH");
-        if (!string.IsNullOrEmpty(msysEnvVar))
-        {
-            possiblePaths.Add(msysEnvVar);
-        }
-
-        // Remove duplicates and check which paths exist
-        possiblePaths = possiblePaths.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
-
-        foreach (var basePath in possiblePaths.Where(Directory.Exists))
+        foreach (var basePath in possiblePaths)
         {
             logger.LogInformation("Found MSYS2 at: {Path}", basePath);
             

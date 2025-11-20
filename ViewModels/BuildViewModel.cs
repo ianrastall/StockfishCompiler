@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Reactive.Concurrency;
 using System.Reactive.Linq;
+using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.Logging;
@@ -15,6 +16,10 @@ public partial class BuildViewModel : ObservableObject, IDisposable
     private readonly MainViewModel _mainViewModel;
     private readonly ILogger<BuildViewModel> _logger;
     private readonly List<IDisposable> _subscriptions = new();
+    private readonly Queue<string> _logQueue = new();
+    private readonly DispatcherTimer _updateTimer;
+    private bool _isDirty = false;
+    private readonly object _logLock = new();
 
     private const int MaxOutputLines = 1000;
 
@@ -28,6 +33,24 @@ public partial class BuildViewModel : ObservableObject, IDisposable
 
         StartBuildCommand = new AsyncRelayCommand(StartBuildAsync, () => !IsBuilding);
         CancelBuildCommand = new RelayCommand(CancelBuild, () => IsBuilding);
+
+        // Setup UI update timer to throttle output updates (4 times per second max)
+        _updateTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(250)
+        };
+        _updateTimer.Tick += (s, e) =>
+        {
+            if (_isDirty)
+            {
+                _isDirty = false;
+                lock (_logLock)
+                {
+                    BuildOutput = string.Join(Environment.NewLine, _logQueue);
+                }
+            }
+        };
+        _updateTimer.Start();
 
         // Marshal all observable subscriptions to UI thread
         var uiScheduler = new SynchronizationContextScheduler(SynchronizationContext.Current!);
@@ -69,19 +92,24 @@ public partial class BuildViewModel : ObservableObject, IDisposable
 
     private void AppendOutput(string line)
     {
-        BuildOutput += line + Environment.NewLine;
-
-        // Implement circular buffer to prevent unbounded memory growth
-        var lineCount = BuildOutput.Count(c => c == '\n');
-        if (lineCount > MaxOutputLines)
+        lock (_logLock)
         {
-            var lines = BuildOutput.Split('\n');
-            BuildOutput = string.Join('\n', lines[^MaxOutputLines..]);
+            _logQueue.Enqueue(line);
+            while (_logQueue.Count > MaxOutputLines)
+            {
+                _logQueue.Dequeue();
+            }
         }
+        _isDirty = true;
     }
 
     private async Task StartBuildAsync()
     {
+        // Clear output queue and display
+        lock (_logLock)
+        {
+            _logQueue.Clear();
+        }
         BuildOutput = string.Empty;
         BuildProgress = 0;
 
@@ -123,28 +151,31 @@ public partial class BuildViewModel : ObservableObject, IDisposable
         if (result.Success)
         {
             _logger.LogInformation("Build completed successfully");
-            BuildOutput += "\n==============================================\n";
-            BuildOutput += "Compilation successful!\n";
-            BuildOutput += "==============================================\n";
+            AppendOutput("\n==============================================");
+            AppendOutput("Compilation successful!");
+            AppendOutput("==============================================");
         }
         else
         {
             _logger.LogError("Build failed with exit code {ExitCode}", result.ExitCode);
-            BuildOutput += "\n==============================================\n";
-            BuildOutput += "Compilation failed!\n";
-            BuildOutput += $"Exit code: {result.ExitCode}\n";
-            BuildOutput += "==============================================\n";
+            AppendOutput("\n==============================================");
+            AppendOutput("Compilation failed!");
+            AppendOutput($"Exit code: {result.ExitCode}");
+            AppendOutput("==============================================");
         }
     }
+
     private void CancelBuild()
     {
         _logger.LogInformation("Build cancelled by user");
         _buildService.CancelBuild();
-        BuildOutput += "\n[Build cancelled by user]\n";
+        AppendOutput("\n[Build cancelled by user]");
     }
 
     public void Dispose()
     {
+        _updateTimer?.Stop();
+        
         foreach (var sub in _subscriptions)
         {
             sub.Dispose();

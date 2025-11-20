@@ -65,12 +65,12 @@ namespace StockfishCompiler
                 services.AddSingleton<ICompilerService, CompilerService>();
                 services.AddSingleton<ICompilerInstallerService, CompilerInstallerService>();
                 services.AddSingleton<IArchitectureDetector, ArchitectureDetector>();
-                services.AddTransient<IBuildService, BuildService>(); // Changed to Transient to avoid state corruption
+                services.AddTransient<IBuildService, BuildService>(); // Transient to avoid state corruption between builds
                 services.AddSingleton<IUserSettingsService, UserSettingsService>();
 
                 // ViewModels
                 services.AddSingleton<MainViewModel>();
-                services.AddTransient<BuildViewModel>(); // Changed to Transient since BuildService is now Transient
+                services.AddSingleton<BuildViewModel>(); // Singleton to preserve state when switching tabs
 
                 Services = services.BuildServiceProvider();
 

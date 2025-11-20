@@ -253,8 +253,8 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
         var makefilePath = Path.Combine(sourceDirectory, "Makefile");
         if (!File.Exists(makefilePath)) return false;
         
-        var content = File.ReadAllText(makefilePath);
-        var originalContent = content;
+        var lines = File.ReadAllLines(makefilePath).ToList();
+        bool changed = false;
         
         var targetsToPatch = new[] 
         { 
@@ -263,28 +263,78 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
             BuildTargets.ConfigSanity, 
             BuildTargets.Analyze 
         };
-        
-        foreach (var target in targetsToPatch)
+
+        for (int i = 0; i < lines.Count; i++)
         {
-            var pattern = $@"^(\s*{Regex.Escape(target)}:\s*)([^\r\n]*)";
-            var regex = new Regex(pattern, RegexOptions.Multiline);
+            var trimmedLine = lines[i].TrimStart();
             
-            content = regex.Replace(content, match =>
+            // Check if this line defines one of our targets
+            foreach (var target in targetsToPatch)
             {
-                var prefix = match.Groups[1].Value;
-                var dependencies = match.Groups[2].Value;
-                
-                var tokens = dependencies.Split(new[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
-                var filtered = tokens.Where(t => !t.Equals(BuildTargets.Net, StringComparison.Ordinal));
-                var newDeps = filtered.Any() ? " " + string.Join(' ', filtered) : string.Empty;
-                
-                return prefix + newDeps;
-            });
+                if (trimmedLine.StartsWith($"{target}:", StringComparison.Ordinal))
+                {
+                    // Process this line and any continuations
+                    var lineIndicesToProcess = new List<int> { i };
+                    
+                    // Collect all lines that are part of this rule (handle line continuations)
+                    int j = i;
+                    while (j < lines.Count && lines[j].TrimEnd().EndsWith("\\", StringComparison.Ordinal))
+                    {
+                        j++;
+                        if (j < lines.Count)
+                        {
+                            lineIndicesToProcess.Add(j);
+                        }
+                    }
+                    
+                    // Remove 'net' from all collected lines
+                    foreach (var lineIdx in lineIndicesToProcess)
+                    {
+                        var line = lines[lineIdx];
+                        
+                        // Remove 'net' as a standalone dependency
+                        // Match patterns: " net ", " net\", "net ", " net", or ":net"
+                        if (line.Contains(" net ") || 
+                            line.Contains(" net\\") ||
+                            line.Contains($":{target.Split(':')[0]} net") ||
+                            line.TrimEnd().EndsWith(" net"))
+                        {
+                            // Replace multiple patterns
+                            var newLine = line
+                                .Replace(" net ", " ")
+                                .Replace(" net\\", "\\")
+                                .Replace(" net\t", " ")
+                                .Replace("\tnet ", "\t")
+                                .Replace("\tnet\t", "\t");
+                            
+                            // Handle 'net' at the end of line (before potential backslash)
+                            if (newLine.TrimEnd('\\').TrimEnd().EndsWith(" net"))
+                            {
+                                var endsWithBackslash = newLine.TrimEnd().EndsWith("\\");
+                                newLine = newLine.TrimEnd('\\').TrimEnd();
+                                newLine = newLine.Substring(0, newLine.Length - 4); // Remove " net"
+                                if (endsWithBackslash)
+                                {
+                                    newLine += " \\";
+                                }
+                            }
+                            
+                            if (newLine != line)
+                            {
+                                lines[lineIdx] = newLine;
+                                changed = true;
+                            }
+                        }
+                    }
+                    
+                    break; // Move to next line after processing this target
+                }
+            }
         }
         
-        if (content != originalContent)
+        if (changed)
         {
-            File.WriteAllText(makefilePath, content);
+            File.WriteAllLines(makefilePath, lines);
             return true;
         }
         
