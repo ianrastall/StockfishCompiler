@@ -1,4 +1,4 @@
-name: Build .NET Application
+name: Build Windows App
 
 on:
   push:
@@ -7,7 +7,6 @@ on:
 
 jobs:
   build:
-    # "windows-latest" is safer if this is a WPF or Windows Forms app
     runs-on: windows-latest
 
     steps:
@@ -17,20 +16,17 @@ jobs:
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '8.0.x' # Change to 6.0 or 7.0 if you use an older version
+          dotnet-version: '8.0.x' # Adjust if you are using .NET 6 or 7
 
-      - name: Restore Dependencies
-        run: dotnet restore
-
-      - name: Build
-        run: dotnet build --configuration Release --no-restore
-
-      - name: Publish (Create Executable)
-        run: dotnet publish --configuration Release --no-build --output ./publish_output
+      # This uses the EXACT command you provided
+      - name: Publish Single File Exe
+        run: dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: StockfishCompiler-App
-          path: ./publish_output
+          name: StockfishCompiler-Exe
+          # This wildcard finds the .exe inside the specific publish folder
+          # regardless of your specific .NET version number.
+          path: '**/bin/Release/**/publish/*.exe'
           if-no-files-found: error
