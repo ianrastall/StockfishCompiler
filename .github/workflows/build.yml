@@ -1,45 +1,35 @@
 name: Build Stockfish
 
-# 1. Trigger the action on push or pull request to main/master branches
 on:
   push:
     branches: [ "main", "master" ]
-    tags:
-      - 'v*' # Also trigger on version tags (e.g., v1.0) for releases
   pull_request:
     branches: [ "main", "master" ]
-  workflow_dispatch: # Allows you to manually trigger the run from the Actions tab
+  workflow_dispatch:
 
 jobs:
   build:
     runs-on: ubuntu-latest
 
     steps:
-      # 2. Checkout your code
       - name: Checkout Code
         uses: actions/checkout@v4
 
-      # 3. Install dependencies (standard Stockfish needs generic build tools)
       - name: Install Build Tools
         run: sudo apt-get update && sudo apt-get install -y make g++
 
-      # 4. Compile Stockfish
-      # Note: Stockfish source is usually in a 'src' folder. 
-      # If your repo structure is different, remove 'cd src'.
       - name: Compile Stockfish
-        run: |
-          cd src
-          make -j $(nproc) build ARCH=x86-64
-          
-      # 5. Upload the binary as an Artifact (The "downloadable file" part)
+        # CHANGED: Removed 'cd src' to build from the repository root
+        run: make -j $(nproc) build ARCH=x86-64
+
       - name: Upload Build Artifact
         uses: actions/upload-artifact@v4
         with:
           name: stockfish-executable
-          path: src/stockfish
+          # CHANGED: Updated path to look for the file in root, not src/
+          path: stockfish 
           if-no-files-found: error
 
-  # 6. Optional: Create a Release when you push a tag (e.g., "v1.0")
   release:
     needs: build
     runs-on: ubuntu-latest
@@ -54,6 +44,7 @@ jobs:
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
+          # CHANGED: Updated path here as well
           files: stockfish
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
