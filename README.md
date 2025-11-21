@@ -6,7 +6,7 @@ A WPF application for compiling Stockfish chess engine with automatic CPU archit
 
 - Automatic compiler detection (MSYS2, MinGW, Clang)
 - CPU architecture detection for optimal performance
-- Download Stockfish source (stable or development)
+- Download Stockfish source (latest stable release or master branch)
 - Profile-guided optimization build
 - Real-time build output and progress
 - Dark-themed UI
@@ -41,6 +41,7 @@ A WPF application for compiling Stockfish chess engine with automatic CPU archit
 2. **Build Configuration Tab**
    - Adjust parallel jobs (defaults to your CPU core count)
    - Set output directory where compiled Stockfish will be saved
+   - Choose which Stockfish source to download (latest stable release or the master branch)
    - Choose build options (download network, strip executable)
 
 3. **Compilation Tab**
@@ -55,7 +56,7 @@ Application logs are saved to:
 %LOCALAPPDATA%\StockfishCompiler\logs\app-YYYY-MM-DD.log
 ```
 
-Use `OpenLogs.bat` to quickly open the logs folder.
+You can open the logs folder directly from File Explorer by pasting the path above into the address bar.
 
 ## License
 
