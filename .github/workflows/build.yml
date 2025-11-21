@@ -38,7 +38,7 @@ jobs:
           dotnet-version: '8.0.x' # Adjust if you are using .NET 6 or 7
 
       - name: Publish Single File Exe
-        run: dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:Version=${{ steps.version.outputs.version }} -p:FileVersion=${{ steps.version.outputs.assemblyVersion }} -p:AssemblyVersion=${{ steps.version.outputs.assemblyVersion }}
+        run: dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:Version=${{ steps.version.outputs.version }} -p:NuGetVersion=${{ steps.version.outputs.version }} -p:FileVersion=${{ steps.version.outputs.assemblyVersion }} -p:AssemblyVersion=${{ steps.version.outputs.assemblyVersion }}
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
