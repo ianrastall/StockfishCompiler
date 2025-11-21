@@ -1,0 +1,12 @@
+<Project>
+  <PropertyGroup>
+    <!-- Fallback version for when Version property is not set or empty -->
+    <Version Condition="'$(Version)' == ''">1.3.0</Version>
+    
+    <!-- Ensure NuGetVersion is always set for assembly generation -->
+    <NuGetVersion Condition="'$(NuGetVersion)' == ''">$(Version)</NuGetVersion>
+    
+    <!-- Keep PackageVersion in sync -->
+    <PackageVersion Condition="'$(PackageVersion)' == ''">$(NuGetVersion)</PackageVersion>
+  </PropertyGroup>
+</Project>
