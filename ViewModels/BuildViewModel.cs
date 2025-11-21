@@ -41,18 +41,7 @@ public partial class BuildViewModel : ObservableObject, IDisposable
         {
             Interval = TimeSpan.FromMilliseconds(250)
         };
-        _updateTimer.Tick += (s, e) =>
-        {
-            if (Interlocked.Exchange(ref _isDirty, 0) == 1)
-            {
-                string output;
-                lock (_logLock)
-                {
-                    output = string.Join(Environment.NewLine, _logQueue);
-                }
-                BuildOutput = output;
-            }
-        };
+        _updateTimer.Tick += UpdateTimer_Tick;
         _updateTimer.Start();
 
         // Marshal all observable subscriptions to UI thread
@@ -196,6 +185,7 @@ public partial class BuildViewModel : ObservableObject, IDisposable
         if (_disposed) return;
         _disposed = true;
 
+        _updateTimer.Tick -= UpdateTimer_Tick;
         _updateTimer?.Stop();
         
         foreach (var sub in _subscriptions)
@@ -204,5 +194,18 @@ public partial class BuildViewModel : ObservableObject, IDisposable
         }
         _subscriptions.Clear();
         GC.SuppressFinalize(this);
+    }
+
+    private void UpdateTimer_Tick(object? sender, EventArgs e)
+    {
+        if (Interlocked.Exchange(ref _isDirty, 0) == 1)
+        {
+            string output;
+            lock (_logLock)
+            {
+                output = string.Join(Environment.NewLine, _logQueue);
+            }
+            BuildOutput = output;
+        }
     }
 }

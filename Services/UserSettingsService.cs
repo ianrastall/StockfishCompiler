@@ -38,8 +38,27 @@ public class UserSettingsService : IUserSettingsService
                 }
                 catch (JsonException ex)
                 {
-                    _logger.LogWarning(ex, "Settings file corrupted, resetting to defaults");
-                    File.Delete(_settingsPath);
+                    _logger.LogWarning(ex, "Settings file corrupted, backing up and resetting to defaults");
+                    var backupPath = _settingsPath + $".backup.{DateTime.Now:yyyyMMddHHmmss}";
+                    try
+                    {
+                        File.Copy(_settingsPath, backupPath);
+                        _logger.LogInformation("Backed up corrupted settings to {Path}", backupPath);
+                    }
+                    catch (Exception backupEx)
+                    {
+                        _logger.LogWarning(backupEx, "Could not backup corrupted settings");
+                    }
+                    
+                    try
+                    {
+                        File.Delete(_settingsPath);
+                    }
+                    catch (Exception deleteEx)
+                    {
+                        _logger.LogWarning(deleteEx, "Could not delete corrupted settings file");
+                    }
+                    
                     var sanitizedDefaults = Sanitize(new UserSettings());
                     Save(sanitizedDefaults);
                     return sanitizedDefaults;

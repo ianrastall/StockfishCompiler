@@ -11,7 +11,7 @@ using StockfishCompiler.Helpers;
 
 namespace StockfishCompiler.ViewModels;
 
-public partial class MainViewModel : ObservableObject
+public partial class MainViewModel : ObservableObject, IDisposable
 {
     private readonly ICompilerService _compilerService;
     private readonly IArchitectureDetector _architectureDetector;
@@ -21,6 +21,7 @@ public partial class MainViewModel : ObservableObject
     private bool _isRestoringSettings;
     private bool _isAdjustingParallelJobs;
     private CancellationTokenSource? _saveDebouncer;
+    private bool _disposed;
 
     public MainViewModel(
         ICompilerService compilerService, 
@@ -259,6 +260,16 @@ public partial class MainViewModel : ObservableObject
         if (_isRestoringSettings || _isAdjustingParallelJobs)
             return;
 
+        if (value <= 0)
+        {
+            _isAdjustingParallelJobs = true;
+            ParallelJobs = 1;
+            _isAdjustingParallelJobs = false;
+            StatusMessage = "Error: Parallel jobs must be at least 1";
+            _logger.LogWarning("Parallel jobs set to invalid value {Value}, resetting to 1", value);
+            return;
+        }
+
         var maxJobs = Math.Min(Environment.ProcessorCount * 2, 32);
         var clampedValue = Math.Clamp(value, 1, maxJobs);
 
@@ -334,4 +345,15 @@ public partial class MainViewModel : ObservableObject
     partial void OnSourceVersionChanged(string value) => PersistUserSettings();
 
     public string SystemInfo => $"{OSHelper.GetFriendlyOSName()} | {RuntimeInformation.ProcessArchitecture} | .NET {Environment.Version}";
+
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        
+        _saveDebouncer?.Cancel();
+        _saveDebouncer?.Dispose();
+        
+        GC.SuppressFinalize(this);
+    }
 }

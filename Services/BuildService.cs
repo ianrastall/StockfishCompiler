@@ -234,7 +234,14 @@ public class BuildService(IStockfishDownloader downloader, ILogger<BuildService>
                 {
                     try
                     {
-                        process.Kill(entireProcessTree: true);
+                        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                        {
+                            process.Kill(entireProcessTree: true);
+                        }
+                        else
+                        {
+                            process.Kill();
+                        }
                     }
                     catch (PlatformNotSupportedException)
                     {
@@ -244,11 +251,15 @@ public class BuildService(IStockfishDownloader downloader, ILogger<BuildService>
                     {
                         // Process already exited
                     }
+                    catch (Exception ex)
+                    {
+                        _logger.LogWarning(ex, "Failed to kill process during cancellation");
+                    }
                 }
             }
-            catch
+            catch (Exception ex)
             {
-                // Ignore kill failures; process may have already exited
+                _logger.LogError(ex, "Error in cancellation handler");
             }
         });
 
@@ -303,17 +314,32 @@ public class BuildService(IStockfishDownloader downloader, ILogger<BuildService>
         }
 
         builder.AppendLine(line);
-        while (builder.Length > MaxOutputCharacters)
+        
+        // Truncate with a safety counter
+        int truncateAttempts = 0;
+        const int maxTruncateAttempts = 100;
+        
+        while (builder.Length > MaxOutputCharacters && truncateAttempts++ < maxTruncateAttempts)
         {
             var content = builder.ToString();
             var idx = content.IndexOf('\n');
             if (idx < 0)
             {
-                builder.Clear();
+                // No more newlines, just truncate from the start
+                var excess = builder.Length - MaxOutputCharacters;
+                builder.Remove(0, Math.Max(1000, excess));
                 break;
             }
             builder.Remove(0, idx + 1);
         }
+        
+        if (truncateAttempts >= maxTruncateAttempts)
+        {
+            _logger.LogWarning("Output truncation loop exceeded maximum attempts");
+            builder.Clear();
+            builder.AppendLine("[Output buffer cleared due to truncation issues]");
+        }
+        
         _outputSubject.OnNext(line);
     }
 
@@ -607,18 +633,37 @@ exit 0
         if (_disposed) return;
         _disposed = true;
         
-        // Cancel any ongoing operations
+        // Cancel any ongoing operations FIRST
         _cts?.Cancel();
-        _cts?.Dispose();
         
-        // Complete observables before disposing (prevents memory leaks)
+        // Wait for active build to complete with timeout
+        if (_activeBuildTask != null)
+        {
+            try 
+            { 
+                _activeBuildTask.Wait(TimeSpan.FromSeconds(5)); 
+            }
+            catch (AggregateException)
+            {
+                // Ignore timeout or cancellation exceptions
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error waiting for build task during disposal");
+            }
+        }
+        
+        // Now safe to complete and dispose observables
         _outputSubject.OnCompleted();
         _progressSubject.OnCompleted();
         _isBuildingSubject.OnCompleted();
         
-        // Now dispose the subjects
         _outputSubject.Dispose();
         _progressSubject.Dispose();
         _isBuildingSubject.Dispose();
+        
+        _cts?.Dispose();
+        _cts = null;
     }
 }
+

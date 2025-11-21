@@ -131,7 +131,17 @@ public class CompilerService(ILogger<CompilerService> logger) : ICompilerService
             
             // Remove duplicates and check which paths exist
             return paths.Distinct(StringComparer.OrdinalIgnoreCase)
-                       .Where(Directory.Exists)
+                       .Where(p =>
+                       {
+                           try
+                           {
+                               return Directory.Exists(p);
+                           }
+                           catch
+                           {
+                               return false;
+                           }
+                       })
                        .ToList();
         });
 

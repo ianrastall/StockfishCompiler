@@ -44,7 +44,18 @@ namespace StockfishCompiler
         {
             try
             {
-                var buildVm = App.Services?.GetService<BuildViewModel>();
+                if (App.Services == null)
+                {
+                    MessageBox.Show(
+                        "Application services not available.",
+                        "Error",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Error
+                    );
+                    return;
+                }
+                
+                var buildVm = App.Services.GetService<BuildViewModel>();
                 var output = buildVm?.BuildOutput;
 
                 if (!string.IsNullOrWhiteSpace(output))

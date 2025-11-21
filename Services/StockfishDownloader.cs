@@ -201,18 +201,25 @@ public class StockfishDownloader : IStockfishDownloader
     {
         using var archive = ZipFile.OpenRead(zipPath);
         var destDirFullPath = Path.GetFullPath(destinationDirectory);
-        if (!Path.EndsInDirectorySeparator(destDirFullPath))
-            destDirFullPath += Path.DirectorySeparatorChar;
-
+        
         foreach (var entry in archive.Entries)
         {
             if (string.IsNullOrEmpty(entry.Name)) continue;
 
             var completeFileName = Path.GetFullPath(Path.Combine(destDirFullPath, entry.FullName));
 
-            if (!completeFileName.StartsWith(destDirFullPath, StringComparison.OrdinalIgnoreCase))
+            // More robust check using Path.GetRelativePath
+            try
             {
-                throw new IOException("Zip Slip vulnerability detected: Entry tries to write outside target directory.");
+                var relativePath = Path.GetRelativePath(destDirFullPath, completeFileName);
+                if (relativePath.StartsWith("..", StringComparison.Ordinal))
+                {
+                    throw new IOException($"Zip Slip vulnerability detected: {entry.FullName}");
+                }
+            }
+            catch (ArgumentException)
+            {
+                throw new IOException($"Invalid path in zip: {entry.FullName}");
             }
 
             var directory = Path.GetDirectoryName(completeFileName);
