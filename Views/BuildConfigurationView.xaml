@@ -7,6 +7,7 @@
                 <StackPanel>
                     <CheckBox Content="Download neural network (NNUE)" IsChecked="{Binding DownloadNetwork}" Style="{StaticResource DarkCheckBox}" Margin="0,5"/>
                     <CheckBox Content="Strip executable (reduce file size)" IsChecked="{Binding StripExecutable}" Style="{StaticResource DarkCheckBox}" Margin="0,5"/>
+                    <CheckBox Content="Use PGO (profile-guided optimization)" IsChecked="{Binding EnablePgo}" Style="{StaticResource DarkCheckBox}" Margin="0,5"/>
                     
                     <StackPanel Orientation="Horizontal" Margin="0,10,0,5">
                         <TextBlock Text="Parallel jobs:" Style="{StaticResource LabelText}" VerticalAlignment="Center"/>

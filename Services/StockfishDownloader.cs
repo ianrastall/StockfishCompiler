@@ -27,6 +27,16 @@ public class StockfishDownloader : IStockfishDownloader
     public StockfishDownloader(HttpClient httpClient)
     {
         _httpClient = httpClient;
+
+        if (_httpClient.Timeout < TimeSpan.FromMinutes(5))
+        {
+            _httpClient.Timeout = TimeSpan.FromMinutes(10);
+        }
+
+        if (_httpClient.DefaultRequestHeaders.UserAgent.Count == 0)
+        {
+            _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("StockfishCompiler/1.0");
+        }
     }
 
     public async Task<ReleaseInfo?> GetLatestReleaseAsync(CancellationToken cancellationToken = default)

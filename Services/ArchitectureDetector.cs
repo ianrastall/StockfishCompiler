@@ -95,8 +95,7 @@ public class ArchitectureDetector : IArchitectureDetector
             _logger.LogWarning(ex, "Feature detection failed, using fallback features");
         }
 
-        // Fallback minimal
-        return (RuntimeInformation.ProcessArchitecture == Architecture.X64 ? X64BaseFeatures.ToList() : new List<string>(), RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant());
+        return GetFallbackFeatures();
     }
 
     private async Task<(List<string> Features, string CpuName)> DetectGccFeaturesAsync(CompilerInfo compiler)
@@ -162,17 +161,28 @@ public class ArchitectureDetector : IArchitectureDetector
             }
             if (trimmed.Contains("[enabled]"))
             {
-                var flag = trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
-                if (!string.IsNullOrEmpty(flag) && flag.StartsWith("-m"))
+                if (!trimmed.Contains("-m", StringComparison.Ordinal))
+                    continue;
+
+                var flag = trimmed.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+                                  .FirstOrDefault(s => s.StartsWith("-m", StringComparison.Ordinal));
+                if (!string.IsNullOrWhiteSpace(flag))
                 {
-                    var name = flag[2..];
-                    features.Add(name);
+                    var name = flag.Length > 2 ? flag[2..] : flag;
+                    if (!string.IsNullOrWhiteSpace(name))
+                        features.Add(name);
                 }
             }
         }
 
         _logger.LogDebug("GCC detection found {Count} features", features.Count);
-        return (features.Distinct(StringComparer.OrdinalIgnoreCase).ToList(), cpuName);
+        var distinct = features.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (distinct.Count == 0)
+        {
+            _logger.LogWarning("No target features detected from GCC output; falling back to base feature detection");
+            return GetFallbackFeatures();
+        }
+        return (distinct, cpuName);
     }
 
     private async Task<(List<string> Features, string CpuName)> DetectClangFeaturesAsync(CompilerInfo compiler)
@@ -227,13 +237,21 @@ public class ArchitectureDetector : IArchitectureDetector
                 var feat = parts.LastOrDefault();
                 if (!string.IsNullOrEmpty(feat) && feat.StartsWith('+'))
                 {
-                    features.Add(feat[1..]);
+                    var name = feat.Length > 1 ? feat[1..] : feat;
+                    if (!string.IsNullOrWhiteSpace(name))
+                        features.Add(name);
                 }
             }
         }
 
         _logger.LogDebug("Clang detection found {Count} features", features.Count);
-        return (features.Distinct(StringComparer.OrdinalIgnoreCase).ToList(), cpuName);
+        var distinct = features.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        if (distinct.Count == 0)
+        {
+            _logger.LogWarning("No target features detected from Clang output; falling back to base feature detection");
+            return GetFallbackFeatures();
+        }
+        return (distinct, cpuName);
     }
 
     private void SetupEnvironmentForMSYS2(ProcessStartInfo psi, string compilerPath)
@@ -296,6 +314,17 @@ public class ArchitectureDetector : IArchitectureDetector
         if (Has("sse3", "popcnt"))
             return "x86-64-sse3-popcnt";
         return "x86-64";
+    }
+
+    private (List<string> Features, string CpuName) GetFallbackFeatures()
+    {
+        var features = RuntimeInformation.ProcessArchitecture switch
+        {
+            Architecture.X64 => X64BaseFeatures.ToList(),
+            Architecture.Arm64 => Arm64BaseFeatures.ToList(),
+            _ => new List<string>()
+        };
+        return (features, RuntimeInformation.ProcessArchitecture.ToString().ToLowerInvariant());
     }
 
     public Task<List<ArchitectureInfo>> GetAvailableArchitecturesAsync()

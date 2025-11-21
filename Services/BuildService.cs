@@ -81,7 +81,9 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
 
             // Verify neural network files are in place and decide build strategy
             var canUsePGO = VerifyNetworkFilesForPGO(sourceDir);
-            if (canUsePGO)
+            var usePgo = configuration.EnablePgo && canUsePGO;
+
+            if (usePgo)
             {
                 ExecuteFileOperation(() =>
                 {
@@ -89,11 +91,19 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
                         _outputSubject.OnNext("Bypassing net.sh because networks are already validated.");
                 }, "net.sh bypass", critical: false);
             }
+            else
+            {
+                if (!configuration.EnablePgo)
+                {
+                    _outputSubject.OnNext("PGO disabled in build options. Using standard optimized build.");
+                }
+                else if (!canUsePGO)
+                {
+                    _outputSubject.OnNext("Warning: Valid neural network not found. Using standard build instead of PGO.");
+                }
+            }
 
-            var buildTarget = canUsePGO ? "profile-build" : "build";
-            
-            if (!canUsePGO)
-                _outputSubject.OnNext("Warning: Valid neural network not found. Using standard build instead of PGO.");
+            var buildTarget = usePgo ? BuildTargets.ProfileBuild : BuildTargets.Build;
 
             // Compile
             _outputSubject.OnNext($"Compiling Stockfish using '{buildTarget}' target...");
@@ -179,6 +189,12 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
         process.StartInfo.ArgumentList.Add(buildTarget);
         process.StartInfo.ArgumentList.Add($"ARCH={safeArch}");
         process.StartInfo.ArgumentList.Add($"COMP={compType}");
+
+        // Suppress noisy missing-profile warnings during profile-build; GCC will still fall back safely when data is absent.
+        if (string.Equals(buildTarget, BuildTargets.ProfileBuild, StringComparison.OrdinalIgnoreCase))
+        {
+            process.StartInfo.ArgumentList.Add("EXTRAPROFILEFLAGS=-Wno-missing-profile");
+        }
 
         foreach (var kvp in env)
             process.StartInfo.EnvironmentVariables[kvp.Key] = kvp.Value;
@@ -289,6 +305,10 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
             : config.SelectedCompiler.Type;
     }
 
+    // Note: The following Makefile/script manipulation helpers are kept for reference.
+    // They are currently not invoked because the build flow relies on verified networks
+    // plus a net.sh bypass when networks are present, which avoids mutating upstream files.
+    #region LegacyBuildTweaks
     private static bool DisableNetDependency(string sourceDirectory)
     {
         var makefilePath = Path.Combine(sourceDirectory, "Makefile");
@@ -423,6 +443,7 @@ exit 0
         
         return false;
     }
+    #endregion
 
     private static bool CreatePlaceholderNetwork(string sourceDirectory)
     {

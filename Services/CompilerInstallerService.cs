@@ -3,6 +3,7 @@ using System.IO;
 using System.Net.Http;
 using System.Security.Cryptography;
 using System.Linq;
+using System.Threading;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 
@@ -10,8 +11,8 @@ namespace StockfishCompiler.Services;
 
 public interface ICompilerInstallerService
 {
-    Task<bool> IsMSYS2InstalledAsync();
-    Task<(bool Success, string InstallPath)> InstallMSYS2Async(IProgress<string>? progress = null);
+    Task<(bool Installed, string? Path)> IsMSYS2InstalledAsync();
+    Task<(bool Success, string InstallPath)> InstallMSYS2Async(IProgress<string>? progress = null, CancellationToken cancellationToken = default);
     Task<bool> InstallMSYS2PackagesAsync(string msys2Path, IProgress<string>? progress = null);
     Task<string> GetRecommendedInstallPathAsync();
 }
@@ -24,9 +25,9 @@ public class CompilerInstallerService(ILogger<CompilerInstallerService> logger, 
     private const string LATEST_API = "https://api.github.com/repos/msys2/msys2-installer/releases/latest";
     private const string DEFAULT_INSTALL_PATH = @"C:\msys64";
     
-    public Task<bool> IsMSYS2InstalledAsync()
+    public Task<(bool Installed, string? Path)> IsMSYS2InstalledAsync()
     {
-        var commonPaths = new[]
+        var candidates = new[]
         {
             @"C:\msys64",
             @"C:\msys2",
@@ -35,7 +36,17 @@ public class CompilerInstallerService(ILogger<CompilerInstallerService> logger, 
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "msys64")
         };
 
-        return Task.FromResult(commonPaths.Any(Directory.Exists));
+        foreach (var path in candidates.Where(Directory.Exists))
+        {
+            var gxx = Path.Combine(path, "mingw64", "bin", "g++.exe");
+            var make = Path.Combine(path, "usr", "bin", "make.exe");
+            if (File.Exists(gxx) && File.Exists(make))
+            {
+                return Task.FromResult<(bool Installed, string? Path)>((true, path));
+            }
+        }
+
+        return Task.FromResult<(bool Installed, string? Path)>((false, null));
     }
 
     public Task<string> GetRecommendedInstallPathAsync()
@@ -58,17 +69,19 @@ public class CompilerInstallerService(ILogger<CompilerInstallerService> logger, 
         return Task.FromResult(DEFAULT_INSTALL_PATH);
     }
 
-    public async Task<(bool Success, string InstallPath)> InstallMSYS2Async(IProgress<string>? progress = null)
+    public async Task<(bool Success, string InstallPath)> InstallMSYS2Async(IProgress<string>? progress = null, CancellationToken cancellationToken = default)
     {
         try
         {
             progress?.Report("Checking for existing MSYS2 installation...");
             
-            if (await IsMSYS2InstalledAsync())
+            var (installed, existingPath) = await IsMSYS2InstalledAsync();
+            
+            if (installed && !string.IsNullOrWhiteSpace(existingPath))
             {
-                logger.LogInformation("MSYS2 already installed");
-                progress?.Report("MSYS2 is already installed on your system.");
-                return (true, DEFAULT_INSTALL_PATH);
+                logger.LogInformation("MSYS2 already installed at {Path}", existingPath);
+                progress?.Report($"MSYS2 is already installed at {existingPath}.");
+                return (true, existingPath);
             }
 
             var installPath = await GetRecommendedInstallPathAsync();
@@ -78,18 +91,18 @@ public class CompilerInstallerService(ILogger<CompilerInstallerService> logger, 
             var tempPath = Path.Combine(Path.GetTempPath(), "msys2-installer.exe");
             
             progress?.Report("Resolving latest MSYS2 installer...");
-            var (installerUrl, expectedHash) = await GetLatestInstallerAsync();
+            var (installerUrl, expectedHash) = await GetLatestInstallerAsync(cancellationToken);
 
             progress?.Report("Downloading MSYS2 installer...");
             logger.LogInformation("Downloading MSYS2 from {Url}", installerUrl);
 
-            using (var response = await httpClient.GetAsync(installerUrl, HttpCompletionOption.ResponseHeadersRead))
+            using (var response = await httpClient.GetAsync(installerUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken))
             {
                 response.EnsureSuccessStatusCode();
-                using var stream = await response.Content.ReadAsStreamAsync();
+                using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
                 using var fileStream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None);
                 
-                await stream.CopyToAsync(fileStream);
+                await stream.CopyToAsync(fileStream, cancellationToken);
             }
 
             // Verify SHA256 checksum for security
@@ -107,14 +120,14 @@ public class CompilerInstallerService(ILogger<CompilerInstallerService> logger, 
                     return (false, string.Empty);
                 }
                 
-                logger.LogInformation("Installer checksum verified successfully");
-                progress?.Report("Installer verified. Starting installation...");
-            }
-            else
-            {
-                logger.LogWarning("Skipping checksum verification because no hash was available for the installer");
-                progress?.Report("Installer downloaded (checksum unavailable). Proceeding with installation...");
-            }
+            logger.LogInformation("Installer checksum verified successfully");
+            progress?.Report("Installer verified. Starting installation...");
+        }
+        else
+        {
+            logger.LogWarning("Skipping checksum verification because no hash was available for the installer");
+            progress?.Report("Installer downloaded (checksum unavailable). Proceeding with installation...");
+        }
 
             // Run the installer silently
             var installArgs = $"install --root \"{installPath}\" --confirm-command";
@@ -137,10 +150,18 @@ public class CompilerInstallerService(ILogger<CompilerInstallerService> logger, 
             }
 
             // Add timeout to prevent indefinite hangs
-            using var cts = new CancellationTokenSource(TimeSpan.FromMinutes(30));
+            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromMinutes(30));
+            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token, cancellationToken);
             try
             {
-                await process.WaitForExitAsync(cts.Token);
+                await process.WaitForExitAsync(linkedCts.Token);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                logger.LogWarning("MSYS2 installation cancelled by user");
+                progress?.Report("Installation cancelled.");
+                try { process.Kill(true); } catch { }
+                return (false, string.Empty);
             }
             catch (OperationCanceledException)
             {
@@ -176,14 +197,14 @@ public class CompilerInstallerService(ILogger<CompilerInstallerService> logger, 
         }
     }
 
-    private async Task<(string Url, string? Sha256)> GetLatestInstallerAsync()
+    private async Task<(string Url, string? Sha256)> GetLatestInstallerAsync(CancellationToken cancellationToken)
     {
         try
         {
-            using var response = await httpClient.GetAsync(LATEST_API, HttpCompletionOption.ResponseHeadersRead);
+            using var response = await httpClient.GetAsync(LATEST_API, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
             response.EnsureSuccessStatusCode();
-            await using var stream = await response.Content.ReadAsStreamAsync();
-            using var doc = await JsonDocument.ParseAsync(stream);
+            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
 
             if (!doc.RootElement.TryGetProperty("assets", out var assetsElement) || assetsElement.ValueKind != JsonValueKind.Array)
                 return (FALLBACK_INSTALLER_URL, FALLBACK_INSTALLER_SHA256);
@@ -212,7 +233,7 @@ public class CompilerInstallerService(ILogger<CompilerInstallerService> logger, 
                 var hashUrl = hashAsset.GetProperty("browser_download_url").GetString();
                 if (!string.IsNullOrEmpty(hashUrl))
                 {
-                    var hashContent = await httpClient.GetStringAsync(hashUrl);
+                    var hashContent = await httpClient.GetStringAsync(hashUrl, cancellationToken);
                     hash = ParseSha256FromFile(hashContent);
                 }
             }

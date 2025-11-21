@@ -9,6 +9,7 @@ namespace StockfishCompiler.Views;
 public partial class CompilerInstallerWindow : Window
 {
     private readonly ICompilerInstallerService _installerService;
+    private CancellationTokenSource? _cts;
     private bool _isInstalling;
 
     public bool CompilerInstalled { get; private set; }
@@ -25,6 +26,7 @@ public partial class CompilerInstallerWindow : Window
         if (_isInstalling) return;
 
         _isInstalling = true;
+        _cts = new CancellationTokenSource();
         InstallButton.IsEnabled = false;
         InstallProgress.Visibility = Visibility.Visible;
         LogTextBox.Clear();
@@ -40,8 +42,7 @@ public partial class CompilerInstallerWindow : Window
 
         try
         {
-            var (success, installPath) = await Task.Run(() => 
-                _installerService.InstallMSYS2Async(progress));
+            var (success, installPath) = await _installerService.InstallMSYS2Async(progress, _cts.Token);
 
             if (success)
             {
@@ -79,6 +80,8 @@ public partial class CompilerInstallerWindow : Window
         finally
         {
             _isInstalling = false;
+            _cts?.Dispose();
+            _cts = null;
             InstallButton.IsEnabled = true;
             InstallProgress.Visibility = Visibility.Collapsed;
         }
@@ -95,6 +98,8 @@ public partial class CompilerInstallerWindow : Window
                 MessageBoxImage.Warning);
             
             if (result != MessageBoxResult.Yes) return;
+
+            _cts?.Cancel();
         }
 
         DialogResult = false;

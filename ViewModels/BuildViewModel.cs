@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Reactive.Concurrency;
 using System.Reactive.Linq;
+using System.Threading;
 using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -18,7 +19,7 @@ public partial class BuildViewModel : ObservableObject, IDisposable
     private readonly List<IDisposable> _subscriptions = new();
     private readonly Queue<string> _logQueue = new();
     private readonly DispatcherTimer _updateTimer;
-    private bool _isDirty = false;
+    private int _isDirty = 0;
     private readonly object _logLock = new();
 
     private const int MaxOutputLines = 1000;
@@ -41,9 +42,8 @@ public partial class BuildViewModel : ObservableObject, IDisposable
         };
         _updateTimer.Tick += (s, e) =>
         {
-            if (_isDirty)
+            if (Interlocked.Exchange(ref _isDirty, 0) == 1)
             {
-                _isDirty = false;
                 lock (_logLock)
                 {
                     BuildOutput = string.Join(Environment.NewLine, _logQueue);
@@ -100,7 +100,7 @@ public partial class BuildViewModel : ObservableObject, IDisposable
                 _logQueue.Dequeue();
             }
         }
-        _isDirty = true;
+        Interlocked.Exchange(ref _isDirty, 1);
     }
 
     private async Task StartBuildAsync()
@@ -122,6 +122,7 @@ public partial class BuildViewModel : ObservableObject, IDisposable
             SourceVersion = _mainViewModel.SourceVersion,
             DownloadNetwork = _mainViewModel.DownloadNetwork,
             StripExecutable = _mainViewModel.StripExecutable,
+            EnablePgo = _mainViewModel.EnablePgo,
             ParallelJobs = _mainViewModel.ParallelJobs,
             OutputDirectory = _mainViewModel.OutputDirectory
         };

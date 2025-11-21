@@ -73,6 +73,9 @@ public partial class MainViewModel : ObservableObject
     private bool stripExecutable = true;
 
     [ObservableProperty]
+    private bool enablePgo = true;
+
+    [ObservableProperty]
     private int parallelJobs = Environment.ProcessorCount;
 
     [ObservableProperty]
@@ -199,6 +202,7 @@ public partial class MainViewModel : ObservableObject
 
             DownloadNetwork = _userSettings.DownloadNetwork;
             StripExecutable = _userSettings.StripExecutable;
+            EnablePgo = _userSettings.EnablePgo;
             ParallelJobs = _userSettings.ParallelJobs;
 
             if (!string.IsNullOrWhiteSpace(_userSettings.OutputDirectory))
@@ -226,6 +230,7 @@ public partial class MainViewModel : ObservableObject
 
         _userSettings.DownloadNetwork = DownloadNetwork;
         _userSettings.StripExecutable = StripExecutable;
+        _userSettings.EnablePgo = EnablePgo;
         _userSettings.ParallelJobs = ParallelJobs;
         _userSettings.OutputDirectory = OutputDirectory;
         _userSettings.SourceVersion = SourceVersion;
@@ -235,6 +240,7 @@ public partial class MainViewModel : ObservableObject
 
     partial void OnDownloadNetworkChanged(bool value) => PersistUserSettings();
     partial void OnStripExecutableChanged(bool value) => PersistUserSettings();
+    partial void OnEnablePgoChanged(bool value) => PersistUserSettings();
     partial void OnParallelJobsChanged(int value)
     {
         // Clamp parallel jobs to reasonable range

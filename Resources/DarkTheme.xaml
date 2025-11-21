@@ -24,6 +24,9 @@
     <SolidColorBrush x:Key="TextPrimaryBrush" Color="{StaticResource TextPrimaryColor}"/>
     <SolidColorBrush x:Key="TextSecondaryBrush" Color="{StaticResource TextSecondaryColor}"/>
     <SolidColorBrush x:Key="BorderBrush" Color="{StaticResource BorderColor}"/>
+    <SolidColorBrush x:Key="BackgroundBrush" Color="{StaticResource SecondaryColor}"/>
+    <SolidColorBrush x:Key="ForegroundBrush" Color="{StaticResource TextPrimaryColor}"/>
+    <SolidColorBrush x:Key="ForegroundMutedBrush" Color="{StaticResource TextSecondaryColor}"/>
 
     <!-- Converters -->
     <local:InverseBooleanConverter x:Key="InverseBooleanConverter"/>

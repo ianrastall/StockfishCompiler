@@ -11,6 +11,9 @@ $files = @(
     "MainWindow.xaml.cs",
     "AssemblyInfo.cs",
 
+    # Constants
+    "Constants\CompilerConstants.cs",
+
     # Views
     "Views\BuildConfigurationView.xaml",
     "Views\BuildConfigurationView.xaml.cs",
@@ -30,6 +33,7 @@ $files = @(
     "Models\BuildConfiguration.cs",
     "Models\CompilationResult.cs",
     "Models\CompilerInfo.cs",
+    "Models\UserSettings.cs",
 
     # Services
     "Services\IArchitectureDetector.cs",
@@ -41,6 +45,13 @@ $files = @(
     "Services\IStockfishDownloader.cs",
     "Services\StockfishDownloader.cs",
     "Services\CompilerInstallerService.cs",
+    "Services\IUserSettingsService.cs",
+    "Services\UserSettingsService.cs",
+
+    # Helpers
+    "Helpers\MSYS2Helper.cs",
+    "Helpers\OSHelper.cs",
+    "Helpers\TextBoxHelper.cs",
 
     # Converters and Resources
     "Converters\ValueConverters.cs",
@@ -48,9 +59,7 @@ $files = @(
 
     # Scripts and docs helpful for context
     "README.md",
-    "TROUBLESHOOTING.md",
-    "BuildRelease.bat",
-    "OpenLogs.bat"
+    "Export-FullContext.ps1"
 )
 
 # Create/overwrite output file

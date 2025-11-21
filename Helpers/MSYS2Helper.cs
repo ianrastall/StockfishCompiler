@@ -73,13 +73,13 @@ public static class MSYS2Helper
 
     public static Dictionary<string, string> SetupEnvironment(BuildConfiguration? config = null)
     {
-        var env = new Dictionary<string, string>();
+        var env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         
         // Copy existing environment
         foreach (System.Collections.DictionaryEntry entry in Environment.GetEnvironmentVariables())
         {
-            if (entry.Key != null && entry.Value != null)
-                env[entry.Key.ToString()!] = entry.Value.ToString()!;
+            if (entry.Key is string key && entry.Value is string value)
+                env[key] = value;
         }
 
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
