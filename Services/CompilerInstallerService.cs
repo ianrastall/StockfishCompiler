@@ -299,16 +299,19 @@ public class CompilerInstallerService(ILogger<CompilerInstallerService> logger, 
                 return false;
             }
 
+            var defaultEnv = ResolveEnvironment(msys2Path, preferClang: false);
+            var clangEnv = ResolveEnvironment(msys2Path, preferClang: true);
+
             // Commands to run
             var commands = new[]
             {
-                ("Updating core packages...", "-c \"pacman -Syu --noconfirm\""),
-                ("Installing MinGW-w64 GCC compiler...", "-c \"pacman -S --noconfirm --needed mingw-w64-x86_64-gcc\""),
-                ("Installing build tools...", "-c \"pacman -S --noconfirm --needed mingw-w64-x86_64-make mingw-w64-x86_64-toolchain\""),
-                ("Installing Clang compiler (optional)...", "-c \"pacman -S --noconfirm --needed mingw-w64-clang-x86_64-clang\"")
+                ("Updating core packages...", "-c \"pacman -Syu --noconfirm\"", defaultEnv),
+                ($"Installing {defaultEnv.SystemName} GCC compiler...", $"-c \"pacman -S --noconfirm --needed {defaultEnv.GccPackagePrefix}-gcc\"", defaultEnv),
+                ("Installing build tools...", $"-c \"pacman -S --noconfirm --needed {defaultEnv.GccPackagePrefix}-make {defaultEnv.GccPackagePrefix}-toolchain\"", defaultEnv),
+                ("Installing Clang compiler (optional)...", $"-c \"pacman -S --noconfirm --needed {clangEnv.ClangPackageName}\"", clangEnv)
             };
 
-            foreach (var (message, command) in commands)
+            foreach (var (message, command, env) in commands)
             {
                 progress?.Report(message);
                 
@@ -323,8 +326,8 @@ public class CompilerInstallerService(ILogger<CompilerInstallerService> logger, 
                     WorkingDirectory = msys2Path,
                     EnvironmentVariables =
                     {
-                        ["MSYSTEM"] = "MINGW64",
-                        ["PATH"] = $"{Path.Combine(msys2Path, "mingw64", "bin")};{Path.Combine(msys2Path, "usr", "bin")}"
+                        ["MSYSTEM"] = env.SystemName,
+                        ["PATH"] = $"{env.BinPath};{Path.Combine(msys2Path, "usr", "bin")}"
                     }
                 };
 
@@ -361,4 +364,24 @@ public class CompilerInstallerService(ILogger<CompilerInstallerService> logger, 
             return false;
         }
     }
+
+    private static MsysEnvironment ResolveEnvironment(string msys2Path, bool preferClang)
+    {
+        var clangBin = Path.Combine(msys2Path, "clang64", "bin");
+        if (preferClang && Directory.Exists(clangBin))
+        {
+            return new MsysEnvironment("CLANG64", clangBin, "mingw-w64-clang-x86_64", "mingw-w64-clang-x86_64-clang");
+        }
+
+        var ucrtBin = Path.Combine(msys2Path, "ucrt64", "bin");
+        if (Directory.Exists(ucrtBin))
+        {
+            return new MsysEnvironment("UCRT64", ucrtBin, "mingw-w64-ucrt-x86_64", "mingw-w64-ucrt-x86_64-clang");
+        }
+
+        var mingwBin = Path.Combine(msys2Path, "mingw64", "bin");
+        return new MsysEnvironment("MINGW64", mingwBin, "mingw-w64-x86_64", "mingw-w64-x86_64-clang");
+    }
+
+    private readonly record struct MsysEnvironment(string SystemName, string BinPath, string GccPackagePrefix, string ClangPackageName);
 }

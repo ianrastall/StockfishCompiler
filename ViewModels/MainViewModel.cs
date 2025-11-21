@@ -21,6 +21,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
     private bool _isRestoringSettings;
     private bool _isAdjustingParallelJobs;
     private CancellationTokenSource? _saveDebouncer;
+    private Task? _pendingSaveTask;
     private bool _disposed;
 
     public MainViewModel(
@@ -235,20 +236,28 @@ public partial class MainViewModel : ObservableObject, IDisposable
         _saveDebouncer?.Cancel();
         _saveDebouncer = new CancellationTokenSource();
 
-        Task.Delay(500, _saveDebouncer.Token)
+        var delayTask = Task.Delay(500, _saveDebouncer.Token);
+        _pendingSaveTask = delayTask
             .ContinueWith(t =>
             {
                 if (t.IsCanceled)
                     return;
 
-                _userSettings.DownloadNetwork = DownloadNetwork;
-                _userSettings.StripExecutable = StripExecutable;
-                _userSettings.EnablePgo = EnablePgo;
-                _userSettings.ParallelJobs = ParallelJobs;
-                _userSettings.OutputDirectory = OutputDirectory;
-                _userSettings.SourceVersion = SourceVersion;
+                try
+                {
+                    _userSettings.DownloadNetwork = DownloadNetwork;
+                    _userSettings.StripExecutable = StripExecutable;
+                    _userSettings.EnablePgo = EnablePgo;
+                    _userSettings.ParallelJobs = ParallelJobs;
+                    _userSettings.OutputDirectory = OutputDirectory;
+                    _userSettings.SourceVersion = SourceVersion;
 
-                _userSettingsService.Save(_userSettings);
+                    _userSettingsService.Save(_userSettings);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(ex, "Failed to persist user settings");
+                }
             }, TaskScheduler.Default);
     }
 
@@ -352,6 +361,14 @@ public partial class MainViewModel : ObservableObject, IDisposable
         _disposed = true;
         
         _saveDebouncer?.Cancel();
+        try
+        {
+            _pendingSaveTask?.Wait(TimeSpan.FromSeconds(1));
+        }
+        catch (Exception ex)
+        {
+            _logger.LogDebug(ex, "Pending user settings save did not complete before disposal");
+        }
         _saveDebouncer?.Dispose();
         
         GC.SuppressFinalize(this);

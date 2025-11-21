@@ -65,8 +65,21 @@ public class CompilerService(ILogger<CompilerService> logger) : ICompilerService
             if (process == null)
                 return string.Empty;
 
-            var output = await process.StandardOutput.ReadToEndAsync();
-            await process.WaitForExitAsync();
+            using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            var outputTask = process.StandardOutput.ReadToEndAsync();
+
+            try
+            {
+                await process.WaitForExitAsync(cts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                try { process.Kill(entireProcessTree: true); } catch { }
+                logger.LogWarning("Timed out while querying compiler version for {Path}", compilerPath);
+                return "Timed out";
+            }
+
+            var output = await outputTask;
             var firstLine = output.Split('\n').FirstOrDefault()?.Trim() ?? string.Empty;
             return firstLine;
         }

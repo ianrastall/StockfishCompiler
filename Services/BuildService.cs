@@ -153,7 +153,7 @@ public class BuildService(IStockfishDownloader downloader, ILogger<BuildService>
         }
         finally
         {
-            CleanupTempDirectoryWithRetry(downloadResult?.TempDirectory, "temporary Stockfish source directory");
+            await CleanupTempDirectoryWithRetryAsync(downloadResult?.TempDirectory, "temporary Stockfish source directory");
             _isBuildingSubject.OnNext(false);
             _cts?.Dispose();
             _cts = null;
@@ -293,7 +293,7 @@ public class BuildService(IStockfishDownloader downloader, ILogger<BuildService>
         finally
         {
             // Clean up profile data even on failure/cancel to avoid cluttering %TEMP%
-            CleanupTempDirectoryWithRetry(profileDir, "profile data directory");
+            await CleanupTempDirectoryWithRetryAsync(profileDir, "profile data directory");
         }
     }
 
@@ -485,7 +485,7 @@ public class BuildService(IStockfishDownloader downloader, ILogger<BuildService>
         }
     }
 
-    private void CleanupTempDirectoryWithRetry(string? tempDirectory, string description = "temporary directory")
+    private async Task CleanupTempDirectoryWithRetryAsync(string? tempDirectory, string description = "temporary directory")
     {
         if (string.IsNullOrWhiteSpace(tempDirectory)) return;
         if (!Directory.Exists(tempDirectory)) return;
@@ -500,11 +500,11 @@ public class BuildService(IStockfishDownloader downloader, ILogger<BuildService>
             }
             catch (IOException) when (attempt < maxRetries)
             {
-                Thread.Sleep(250 * attempt);
+                await Task.Delay(250 * attempt);
             }
             catch (UnauthorizedAccessException) when (attempt < maxRetries)
             {
-                Thread.Sleep(250 * attempt);
+                await Task.Delay(250 * attempt);
             }
             catch (Exception ex)
             {
@@ -636,21 +636,17 @@ exit 0
         // Cancel any ongoing operations FIRST
         _cts?.Cancel();
         
-        // Wait for active build to complete with timeout
-        if (_activeBuildTask != null)
+        // If a build is still running, cancel and observe completion without blocking UI thread
+        if (_activeBuildTask is { IsCompleted: false } buildTask)
         {
-            try 
-            { 
-                _activeBuildTask.Wait(TimeSpan.FromSeconds(5)); 
-            }
-            catch (AggregateException)
+            _logger.LogInformation("Cancelling active build during disposal");
+            _ = buildTask.ContinueWith(t =>
             {
-                // Ignore timeout or cancellation exceptions
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Error waiting for build task during disposal");
-            }
+                if (t.IsFaulted && t.Exception != null)
+                {
+                    _logger.LogWarning(t.Exception, "Build task faulted during disposal");
+                }
+            }, TaskScheduler.Default);
         }
         
         // Now safe to complete and dispose observables
@@ -666,4 +662,3 @@ exit 0
         _cts = null;
     }
 }
-

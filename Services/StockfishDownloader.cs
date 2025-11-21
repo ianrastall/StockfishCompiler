@@ -22,6 +22,7 @@ public class StockfishDownloader : IStockfishDownloader
         "https://github.com/official-stockfish/networks/raw/master/{0}"
     ];
     private static readonly Regex NetworkMacroRegex = new("#define\\s+EvalFileDefaultName\\w*\\s+\"(nn-[a-z0-9]{12}\\.nnue)\"", RegexOptions.IgnoreCase | RegexOptions.Compiled, TimeSpan.FromSeconds(1));
+    private static readonly Regex RelaxedNetworkNameRegex = new("nn-[a-z0-9]{6,}\\.nnue", RegexOptions.IgnoreCase | RegexOptions.Compiled, TimeSpan.FromSeconds(1));
     private static readonly Regex NetworkFileNameRegex = new("nn-([a-f0-9]{12})\\.nnue", RegexOptions.IgnoreCase | RegexOptions.Compiled, TimeSpan.FromSeconds(1));
     private const long MaxDownloadSize = 500L * 1024 * 1024; // 500 MB safety cap
 
@@ -111,6 +112,14 @@ public class StockfishDownloader : IStockfishDownloader
         var networkFiles = DetectNetworkFileNames(sourceDirectory);
         if (networkFiles.Count == 0)
         {
+            var existingNetworks = Directory.GetFiles(sourceDirectory, "*.nnue", SearchOption.AllDirectories);
+            if (existingNetworks.Length > 0)
+            {
+                var shortNames = existingNetworks.Select(Path.GetFileName).Where(n => !string.IsNullOrWhiteSpace(n));
+                progress?.Report($"Found existing NNUE file(s): {string.Join(", ", shortNames)}");
+                return true;
+            }
+
             progress?.Report("Could not determine default network files - build will attempt to download them.");
             return false;
         }
@@ -250,6 +259,32 @@ public class StockfishDownloader : IStockfishDownloader
                 if (match.Success)
                     names.Add(match.Groups[1].Value);
             }
+
+            if (names.Count == 0)
+            {
+                foreach (Match match in RelaxedNetworkNameRegex.Matches(contents))
+                {
+                    if (match.Success)
+                        names.Add(match.Value);
+                }
+            }
+        }
+
+        if (names.Count == 0)
+        {
+            // Fallback to any NNUE files already present anywhere in the source tree
+            foreach (var file in Directory.GetFiles(sourceDirectory, "*.nnue", SearchOption.AllDirectories))
+            {
+                var name = Path.GetFileName(file);
+                if (!string.IsNullOrWhiteSpace(name))
+                    names.Add(name);
+            }
+        }
+
+        if (names.Count == 0 && File.Exists(Path.Combine(sourceDirectory, "Makefile")))
+        {
+            // Stockfish changes macro names occasionally; use the classic default as a last resort
+            names.Add("nn-1c0000000000.nnue");
         }
 
         return names.ToList();

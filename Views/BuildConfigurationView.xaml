@@ -1,6 +1,7 @@
 <UserControl x:Class="StockfishCompiler.Views.BuildConfigurationView"
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:conv="clr-namespace:StockfishCompiler.Converters">
     <ScrollViewer>
         <StackPanel Margin="20">
             <GroupBox Header="Build Options" Style="{StaticResource DarkGroupBox}">
@@ -11,7 +12,15 @@
                     
                     <StackPanel Orientation="Horizontal" Margin="0,10,0,5">
                         <TextBlock Text="Parallel jobs:" Style="{StaticResource LabelText}" VerticalAlignment="Center"/>
-                        <TextBox Width="60" Text="{Binding ParallelJobs}" Style="{StaticResource DarkTextBox}"/>
+                        <TextBox Width="60" Style="{StaticResource DarkTextBox}">
+                            <TextBox.Text>
+                                <Binding Path="ParallelJobs" UpdateSourceTrigger="PropertyChanged" NotifyOnValidationError="True">
+                                    <Binding.ValidationRules>
+                                        <conv:IntegerValidationRule Minimum="1" Maximum="32"/>
+                                    </Binding.ValidationRules>
+                                </Binding>
+                            </TextBox.Text>
+                        </TextBox>
                         <TextBlock Text="(CPU cores)" Style="{StaticResource InfoText}" Margin="10,0" VerticalAlignment="Center"/>
                     </StackPanel>
                 </StackPanel>

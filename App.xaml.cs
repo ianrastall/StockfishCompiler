@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
 using System.Linq;
+using System.Threading.Tasks;
 using System.Windows;
 using StockfishCompiler.Services;
 using StockfishCompiler.ViewModels;
@@ -40,8 +41,6 @@ namespace StockfishCompiler
 
             try
             {
-                CleanupStaleTempDirectories();
-
                 base.OnStartup(e);
 
                 var services = new ServiceCollection();
@@ -82,6 +81,20 @@ namespace StockfishCompiler
 
                 Log.Information("MainWindow created, showing...");
                 window.Show();
+
+                // Run cleanup work off the UI thread so slow disk IO doesn't block startup
+                _ = Task.Run(() =>
+                {
+                    try
+                    {
+                        CleanupStaleTempDirectories();
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Warning(ex, "Background cleanup of temp directories failed");
+                    }
+                });
+
                 Log.Information("Application startup complete");
             }
             catch (Exception ex)
