@@ -194,13 +194,17 @@ public class StockfishDownloader : IStockfishDownloader
 
         foreach (var entry in archive.Entries)
         {
-            if (string.IsNullOrEmpty(entry.Name)) continue;
-
             var completeFileName = Path.GetFullPath(Path.Combine(destDirFullPath, entry.FullName));
 
             if (!completeFileName.StartsWith(destDirFullPath, StringComparison.OrdinalIgnoreCase))
             {
                 throw new IOException("Zip Slip vulnerability detected: Entry tries to write outside target directory.");
+            }
+
+            if (string.IsNullOrEmpty(entry.Name))
+            {
+                Directory.CreateDirectory(completeFileName);
+                continue;
             }
 
             var directory = Path.GetDirectoryName(completeFileName);
