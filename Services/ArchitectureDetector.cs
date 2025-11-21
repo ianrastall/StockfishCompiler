@@ -19,16 +19,46 @@ public class ArchitectureDetector : IArchitectureDetector
 
     public async Task<ArchitectureInfo> DetectOptimalArchitectureAsync(CompilerInfo compiler)
     {
-        var (features, detectedCpu) = await DetectCPUFeaturesDetailedAsync(compiler);
-        _logger.LogDebug("Detected {Count} CPU features: {Features}", features.Count, string.Join(", ", features));
-        _logger.LogDebug("Detected CPU name: {CpuName}", detectedCpu);
-        
-        var archId = DetermineOptimalArchitecture(features, detectedCpu);
-        _logger.LogInformation("Determined optimal architecture: {Architecture}", archId);
-        
-        var all = await GetAvailableArchitecturesAsync();
-        var matched = all.FirstOrDefault(a => a.Id.Equals(archId, StringComparison.OrdinalIgnoreCase));
-        return matched ?? new ArchitectureInfo { Id = archId, Name = archId, Description = archId, Category = RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? "ARM" : "x86" };
+        try
+        {
+            var (features, detectedCpu) = await DetectCPUFeaturesDetailedAsync(compiler);
+            _logger.LogDebug("Detected {Count} CPU features: {Features}", features.Count, string.Join(", ", features));
+            _logger.LogDebug("Detected CPU name: {CpuName}", detectedCpu);
+            
+            var archId = DetermineOptimalArchitecture(features, detectedCpu);
+            _logger.LogInformation("Determined optimal architecture: {Architecture}", archId);
+            
+            var all = await GetAvailableArchitecturesAsync();
+            var matched = all.FirstOrDefault(a => a.Id.Equals(archId, StringComparison.OrdinalIgnoreCase));
+            return matched ?? new ArchitectureInfo 
+            { 
+                Id = archId, 
+                Name = archId, 
+                Description = archId, 
+                Category = RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? "ARM" : "x86" 
+            };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Architecture detection failed for {Compiler}, using fallback", compiler.DisplayName);
+            
+            // Fallback to safe generic architecture based on platform
+            var fallbackId = RuntimeInformation.ProcessArchitecture == Architecture.Arm64 
+                ? "armv8" 
+                : "x86-64";
+            
+            var all = await GetAvailableArchitecturesAsync();
+            var fallback = all.FirstOrDefault(a => a.Id == fallbackId);
+            
+            return fallback ?? new ArchitectureInfo
+            {
+                Id = fallbackId,
+                Name = fallbackId,
+                Description = $"{fallbackId} (fallback - detection failed)",
+                Category = RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? "ARM" : "x86",
+                IsRecommended = false
+            };
+        }
     }
 
     public async Task<List<string>> DetectCPUFeaturesAsync(CompilerInfo compiler)

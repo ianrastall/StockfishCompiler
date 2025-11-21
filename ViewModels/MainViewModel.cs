@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using System.IO;
 using System.Runtime.InteropServices;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -247,9 +248,72 @@ public partial class MainViewModel : ObservableObject
             ParallelJobs = maxJobs;
         }
         
+        if (value < 1 || value > maxJobs)
+        {
+            StatusMessage = $"Warning: Parallel jobs adjusted to valid range (1-{maxJobs})";
+        }
+        
         PersistUserSettings();
     }
-    partial void OnOutputDirectoryChanged(string value) => PersistUserSettings();
+
+    partial void OnOutputDirectoryChanged(string value)
+    {
+        if (!ValidateOutputDirectory(value))
+        {
+            StatusMessage = "Warning: Invalid output directory path";
+        }
+        
+        PersistUserSettings();
+    }
+
+    private bool ValidateOutputDirectory(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return false;
+
+        try
+        {
+            // Check if path is rooted (absolute)
+            if (!Path.IsPathRooted(path))
+            {
+                _logger.LogWarning("Output directory is not an absolute path: {Path}", path);
+                return false;
+            }
+
+            // Get full path and check for invalid characters
+            var fullPath = Path.GetFullPath(path);
+            var invalidChars = Path.GetInvalidPathChars();
+
+            if (path.Any(c => invalidChars.Contains(c)))
+            {
+                _logger.LogWarning("Output directory contains invalid characters: {Path}", path);
+                return false;
+            }
+
+            // Try to create directory to verify write access
+            if (!Directory.Exists(fullPath))
+            {
+                try
+                {
+                    Directory.CreateDirectory(fullPath);
+                    _logger.LogInformation("Created output directory: {Path}", fullPath);
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    _logger.LogWarning("No write access to output directory: {Path}", fullPath);
+                    return false;
+                }
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Error validating output directory: {Path}", path);
+            return false;
+        }
+    }
+
     partial void OnSourceVersionChanged(string value) => PersistUserSettings();
 
     public string SystemInfo => $"{OSHelper.GetFriendlyOSName()} | {RuntimeInformation.ProcessArchitecture} | .NET {Environment.Version}";

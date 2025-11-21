@@ -27,6 +27,33 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
 
     private const int MaxOutputCharacters = 500_000; // safety cap
 
+    /// <summary>
+    /// Safely executes a file operation with error handling and logging
+    /// </summary>
+    private bool SafeFileOperation(Action operation, string operationName)
+    {
+        try
+        {
+            operation();
+            return true;
+        }
+        catch (IOException ex)
+        {
+            _outputSubject.OnNext($"Warning: {operationName} failed (I/O error): {ex.Message}");
+            return false;
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            _outputSubject.OnNext($"Warning: {operationName} failed (access denied): {ex.Message}");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            _outputSubject.OnNext($"Warning: {operationName} failed: {ex.Message}");
+            return false;
+        }
+    }
+
     public async Task<CompilationResult> BuildAsync(BuildConfiguration configuration)
     {
         _cts = new CancellationTokenSource();
@@ -53,14 +80,30 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
                 _progressSubject.OnNext(networkReady ? 40 : 30);
             }
 
-            if (DisableNetDependency(sourceDir))
-                _outputSubject.OnNext("Patched makefile to skip redundant net target.");
-            if (NeutralizeNetScript(downloadResult.RootDirectory))
-                _outputSubject.OnNext("Neutralized net.sh script to prevent redundant downloads.");
-            if (PatchMakefileSaveTemps(sourceDir))
-                _outputSubject.OnNext("Removed -save-temps flag to prevent network embedding issues.");
-            if (CreatePlaceholderNetwork(sourceDir))
-                _outputSubject.OnNext("Created placeholder network file for LTO linking.");
+            // Use safe file operations for patching
+            SafeFileOperation(() => 
+            {
+                if (DisableNetDependency(sourceDir))
+                    _outputSubject.OnNext("Patched makefile to skip redundant net target.");
+            }, "Makefile net dependency patch");
+            
+            SafeFileOperation(() =>
+            {
+                if (NeutralizeNetScript(downloadResult.RootDirectory))
+                    _outputSubject.OnNext("Neutralized net.sh script to prevent redundant downloads.");
+            }, "net.sh script neutralization");
+            
+            SafeFileOperation(() =>
+            {
+                if (PatchMakefileSaveTemps(sourceDir))
+                    _outputSubject.OnNext("Removed -save-temps flag to prevent network embedding issues.");
+            }, "Makefile save-temps patch");
+            
+            SafeFileOperation(() =>
+            {
+                if (CreatePlaceholderNetwork(sourceDir))
+                    _outputSubject.OnNext("Created placeholder network file for LTO linking.");
+            }, "Placeholder network creation");
 
             // Verify neural network files are in place and decide build strategy
             var canUsePGO = VerifyNetworkFilesForPGO(sourceDir);
@@ -570,7 +613,17 @@ exit 0
     {
         if (_disposed) return;
         _disposed = true;
+        
+        // Cancel any ongoing operations
+        _cts?.Cancel();
         _cts?.Dispose();
+        
+        // Complete observables before disposing (prevents memory leaks)
+        _outputSubject.OnCompleted();
+        _progressSubject.OnCompleted();
+        _isBuildingSubject.OnCompleted();
+        
+        // Now dispose the subjects
         _outputSubject.Dispose();
         _progressSubject.Dispose();
         _isBuildingSubject.Dispose();
