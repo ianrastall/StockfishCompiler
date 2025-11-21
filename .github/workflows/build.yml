@@ -20,17 +20,35 @@ jobs:
         id: version
         shell: pwsh
         run: |
+          # 1. Try to get the tag, default to 1.2.0 if none exists
           $tag = git describe --tags --abbrev=0 2>$null
-          if (-not $tag) {
-            Write-Host "No tag found, defaulting version to 0.0.0"
-            $tag = "0.0.0"
+          if ([string]::IsNullOrWhiteSpace($tag)) { 
+            Write-Host "No tags found. Defaulting to 1.2.0"
+            $tag = "1.2.0" 
           }
+
+          # 2. Remove 'v' prefix if present (v1.0 -> 1.0)
           if ($tag.StartsWith("v")) { $tag = $tag.Substring(1) }
-          $parts = $tag.Split('.')
-          while ($parts.Count -lt 4) { $parts += "0" }
-          $assemblyVersion = ($parts -join '.')
-          Write-Host "version=$tag" >> $env:GITHUB_OUTPUT
-          Write-Host "assemblyVersion=$assemblyVersion" >> $env:GITHUB_OUTPUT
+
+          # 3. Create a "Clean" version for Windows (Must be numbers only!)
+          # This strips off "-beta", "-alpha", etc.
+          $cleanVer = $tag.Split('-')[0]
+
+          # 4. Split into parts and ensure we have 4 numbers (x.y.z.w)
+          $parts = $cleanVer.Split('.')
+          [System.Collections.ArrayList]$verParts = $parts
+          while ($verParts.Count -lt 4) { $verParts.Add("0") }
+          
+          # Join them back together (e.g., 1.2 -> 1.2.0.0)
+          $assemblyVersion = $verParts -join '.'
+
+          # 5. Output results
+          Write-Host "Detected Display Version: $tag"
+          Write-Host "Detected Assembly Version: $assemblyVersion"
+          
+          # Use the new GITHUB_OUTPUT syntax
+          "version=$tag" >> $env:GITHUB_OUTPUT
+          "assemblyVersion=$assemblyVersion" >> $env:GITHUB_OUTPUT
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
