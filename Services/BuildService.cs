@@ -28,29 +28,22 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
     private const int MaxOutputCharacters = 500_000; // safety cap
 
     /// <summary>
-    /// Safely executes a file operation with error handling and logging
+    /// Executes a file operation and optionally fails the build when it cannot complete.
     /// </summary>
-    private bool SafeFileOperation(Action operation, string operationName)
+    private void ExecuteFileOperation(Action operation, string operationName, bool critical = true)
     {
         try
         {
             operation();
-            return true;
-        }
-        catch (IOException ex)
-        {
-            _outputSubject.OnNext($"Warning: {operationName} failed (I/O error): {ex.Message}");
-            return false;
-        }
-        catch (UnauthorizedAccessException ex)
-        {
-            _outputSubject.OnNext($"Warning: {operationName} failed (access denied): {ex.Message}");
-            return false;
         }
         catch (Exception ex)
         {
-            _outputSubject.OnNext($"Warning: {operationName} failed: {ex.Message}");
-            return false;
+            var severity = critical ? "Error" : "Warning";
+            _outputSubject.OnNext($"{severity}: {operationName} failed: {ex.Message}");
+            if (critical)
+            {
+                throw;
+            }
         }
     }
 
@@ -80,33 +73,23 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
                 _progressSubject.OnNext(networkReady ? 40 : 30);
             }
 
-            // Use safe file operations for patching
-            SafeFileOperation(() => 
-            {
-                if (DisableNetDependency(sourceDir))
-                    _outputSubject.OnNext("Patched makefile to skip redundant net target.");
-            }, "Makefile net dependency patch");
-            
-            SafeFileOperation(() =>
-            {
-                if (NeutralizeNetScript(downloadResult.RootDirectory))
-                    _outputSubject.OnNext("Neutralized net.sh script to prevent redundant downloads.");
-            }, "net.sh script neutralization");
-            
-            SafeFileOperation(() =>
-            {
-                if (PatchMakefileSaveTemps(sourceDir))
-                    _outputSubject.OnNext("Removed -save-temps flag to prevent network embedding issues.");
-            }, "Makefile save-temps patch");
-            
-            SafeFileOperation(() =>
+            ExecuteFileOperation(() =>
             {
                 if (CreatePlaceholderNetwork(sourceDir))
                     _outputSubject.OnNext("Created placeholder network file for LTO linking.");
-            }, "Placeholder network creation");
+            }, "Placeholder network creation", critical: false);
 
             // Verify neural network files are in place and decide build strategy
             var canUsePGO = VerifyNetworkFilesForPGO(sourceDir);
+            if (canUsePGO)
+            {
+                ExecuteFileOperation(() =>
+                {
+                    if (BypassNetScriptIfNetworksPresent(downloadResult.RootDirectory))
+                        _outputSubject.OnNext("Bypassing net.sh because networks are already validated.");
+                }, "net.sh bypass", critical: false);
+            }
+
             var buildTarget = canUsePGO ? "profile-build" : "build";
             
             if (!canUsePGO)
@@ -137,9 +120,14 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
         {
             return new CompilationResult { Success = false, Output = "Canceled", ExitCode = -1 };
         }
+        catch (Exception ex)
+        {
+            _outputSubject.OnNext($"Build failed: {ex.Message}");
+            return new CompilationResult { Success = false, Output = ex.ToString(), ExitCode = -1 };
+        }
         finally
         {
-            CleanupTempDirectoryWithRetry(downloadResult?.TempDirectory);
+            CleanupTempDirectoryWithRetry(downloadResult?.TempDirectory, "temporary Stockfish source directory");
             _isBuildingSubject.OnNext(false);
         }
     }
@@ -156,9 +144,10 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
 
         // Ensure PGO profile data lands in a short, writable path to avoid GCOV path explosions on Windows
         // Use unique directory per build to avoid conflicts between concurrent builds
-        var profileDir = Path.Combine(Path.GetTempPath(), $"sf_prof_{Guid.NewGuid():N}");
+        string? profileDir = null;
         try
         {
+            profileDir = Path.Combine(Path.GetTempPath(), $"sf_prof_{Guid.NewGuid():N}");
             Directory.CreateDirectory(profileDir);
             env["PROFDIR"] = profileDir;
             env["GCOV_PREFIX"] = profileDir;
@@ -225,14 +214,22 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
         var readStdErr = ReadAsync(process.StandardError);
         var waitExit = process.WaitForExitAsync(token);
 
-        await Task.WhenAll(readStdOut, readStdErr, waitExit);
-
-        return new CompilationResult
+        try
         {
-            Success = process.ExitCode == 0,
-            Output = outputBuilder.ToString(),
-            ExitCode = process.ExitCode
-        };
+            await Task.WhenAll(readStdOut, readStdErr, waitExit);
+
+            return new CompilationResult
+            {
+                Success = process.ExitCode == 0,
+                Output = outputBuilder.ToString(),
+                ExitCode = process.ExitCode
+            };
+        }
+        finally
+        {
+            // Clean up profile data even on failure/cancel to avoid cluttering %TEMP%
+            CleanupTempDirectoryWithRetry(profileDir, "profile data directory");
+        }
     }
 
     private void AppendOutput(StringBuilder builder, string line)
@@ -253,7 +250,6 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
             StartInfo = new ProcessStartInfo
             {
                 FileName = makeCmd,
-                Arguments = $"strip COMP={GetCompType(config)}",
                 WorkingDirectory = sourcePath,
                 RedirectStandardOutput = false,
                 RedirectStandardError = false,
@@ -261,6 +257,8 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
                 CreateNoWindow = true
             }
         };
+        process.StartInfo.ArgumentList.Add("strip");
+        process.StartInfo.ArgumentList.Add($"COMP={GetCompType(config)}");
         foreach (var kvp in env)
             process.StartInfo.EnvironmentVariables[kvp.Key] = kvp.Value;
         process.Start();
@@ -509,7 +507,7 @@ exit 0
         }
     }
 
-    private void CleanupTempDirectoryWithRetry(string? tempDirectory)
+    private void CleanupTempDirectoryWithRetry(string? tempDirectory, string description = "temporary directory")
     {
         if (string.IsNullOrWhiteSpace(tempDirectory)) return;
         if (!Directory.Exists(tempDirectory)) return;
@@ -519,7 +517,7 @@ exit 0
             try
             {
                 Directory.Delete(tempDirectory, true);
-                _outputSubject.OnNext($"Cleaned up temporary Stockfish source directory.");
+                _outputSubject.OnNext($"Cleaned up {description}.");
                 return;
             }
             catch (IOException) when (attempt < maxRetries)
@@ -532,12 +530,30 @@ exit 0
             }
             catch (Exception ex)
             {
-                _outputSubject.OnNext($"Warning: Could not delete temp directory {tempDirectory}: {ex.Message}");
+                _outputSubject.OnNext($"Warning: Could not delete {description} at {tempDirectory}: {ex.Message}");
                 return;
             }
         }
         if (Directory.Exists(tempDirectory))
-            _outputSubject.OnNext($"Warning: Temp directory persists: {tempDirectory}");
+            _outputSubject.OnNext($"Warning: {description} persists: {tempDirectory}");
+    }
+
+    private bool BypassNetScriptIfNetworksPresent(string? rootDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(rootDirectory))
+            return false;
+
+        var scriptPath = Path.Combine(rootDirectory, "scripts", "net.sh");
+        if (!File.Exists(scriptPath))
+            return false;
+
+        var scriptContent = """
+#!/bin/sh
+echo "Networks already present; skipping net target."
+exit 0
+""";
+        File.WriteAllText(scriptPath, scriptContent.Replace("\r\n", "\n"));
+        return true;
     }
 
     private static int SanitizeParallelJobs(int jobs)

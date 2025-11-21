@@ -2,6 +2,8 @@ using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
 using System.Security.Cryptography;
+using System.Linq;
+using System.Text.Json;
 using Microsoft.Extensions.Logging;
 
 namespace StockfishCompiler.Services;
@@ -16,10 +18,10 @@ public interface ICompilerInstallerService
 
 public class CompilerInstallerService(ILogger<CompilerInstallerService> logger, HttpClient httpClient) : ICompilerInstallerService
 {
-    // Use a specific version with known hash for security
-    // Update these when upgrading MSYS2 version
-    private const string MSYS2_INSTALLER_URL = "https://github.com/msys2/msys2-installer/releases/download/2024-01-13/msys2-x86_64-20240113.exe";
-    private const string MSYS2_INSTALLER_SHA256 = "a24ca2f57c21c0f16d5d2e5e80f0ac94bdadad48f06cc11f06cb9e7526f18a66";
+    // Fallback to a known-good installer if latest lookup fails
+    private const string FALLBACK_INSTALLER_URL = "https://github.com/msys2/msys2-installer/releases/download/2024-01-13/msys2-x86_64-20240113.exe";
+    private const string FALLBACK_INSTALLER_SHA256 = "a24ca2f57c21c0f16d5d2e5e80f0ac94bdadad48f06cc11f06cb9e7526f18a66";
+    private const string LATEST_API = "https://api.github.com/repos/msys2/msys2-installer/releases/latest";
     private const string DEFAULT_INSTALL_PATH = @"C:\msys64";
     
     public Task<bool> IsMSYS2InstalledAsync()
@@ -75,10 +77,13 @@ public class CompilerInstallerService(ILogger<CompilerInstallerService> logger, 
             // Download the installer
             var tempPath = Path.Combine(Path.GetTempPath(), "msys2-installer.exe");
             
-            progress?.Report("Downloading MSYS2 installer...");
-            logger.LogInformation("Downloading MSYS2 from {Url}", MSYS2_INSTALLER_URL);
+            progress?.Report("Resolving latest MSYS2 installer...");
+            var (installerUrl, expectedHash) = await GetLatestInstallerAsync();
 
-            using (var response = await httpClient.GetAsync(MSYS2_INSTALLER_URL, HttpCompletionOption.ResponseHeadersRead))
+            progress?.Report("Downloading MSYS2 installer...");
+            logger.LogInformation("Downloading MSYS2 from {Url}", installerUrl);
+
+            using (var response = await httpClient.GetAsync(installerUrl, HttpCompletionOption.ResponseHeadersRead))
             {
                 response.EnsureSuccessStatusCode();
                 using var stream = await response.Content.ReadAsStreamAsync();
@@ -88,20 +93,28 @@ public class CompilerInstallerService(ILogger<CompilerInstallerService> logger, 
             }
 
             // Verify SHA256 checksum for security
-            progress?.Report("Verifying installer integrity...");
-            logger.LogInformation("Verifying SHA256 checksum of downloaded installer");
-            
-            if (!await VerifyFileHashAsync(tempPath, MSYS2_INSTALLER_SHA256))
+            if (!string.IsNullOrWhiteSpace(expectedHash))
             {
-                logger.LogError("MSYS2 installer hash mismatch! Expected: {Expected}", MSYS2_INSTALLER_SHA256);
-                progress?.Report("ERROR: Installer integrity check failed! The downloaded file may be corrupted or tampered with.");
+                progress?.Report("Verifying installer integrity...");
+                logger.LogInformation("Verifying SHA256 checksum of downloaded installer");
                 
-                try { File.Delete(tempPath); } catch { }
-                return (false, string.Empty);
+                if (!await VerifyFileHashAsync(tempPath, expectedHash))
+                {
+                    logger.LogError("MSYS2 installer hash mismatch! Expected: {Expected}", expectedHash);
+                    progress?.Report("ERROR: Installer integrity check failed! The downloaded file may be corrupted or tampered with.");
+                    
+                    try { File.Delete(tempPath); } catch { }
+                    return (false, string.Empty);
+                }
+                
+                logger.LogInformation("Installer checksum verified successfully");
+                progress?.Report("Installer verified. Starting installation...");
             }
-            
-            logger.LogInformation("Installer checksum verified successfully");
-            progress?.Report("Installer verified. Starting installation...");
+            else
+            {
+                logger.LogWarning("Skipping checksum verification because no hash was available for the installer");
+                progress?.Report("Installer downloaded (checksum unavailable). Proceeding with installation...");
+            }
 
             // Run the installer silently
             var installArgs = $"install --root \"{installPath}\" --confirm-command";
@@ -161,6 +174,74 @@ public class CompilerInstallerService(ILogger<CompilerInstallerService> logger, 
             progress?.Report($"Installation error: {ex.Message}");
             return (false, string.Empty);
         }
+    }
+
+    private async Task<(string Url, string? Sha256)> GetLatestInstallerAsync()
+    {
+        try
+        {
+            using var response = await httpClient.GetAsync(LATEST_API, HttpCompletionOption.ResponseHeadersRead);
+            response.EnsureSuccessStatusCode();
+            await using var stream = await response.Content.ReadAsStreamAsync();
+            using var doc = await JsonDocument.ParseAsync(stream);
+
+            if (!doc.RootElement.TryGetProperty("assets", out var assetsElement) || assetsElement.ValueKind != JsonValueKind.Array)
+                return (FALLBACK_INSTALLER_URL, FALLBACK_INSTALLER_SHA256);
+
+            var assets = assetsElement.EnumerateArray().ToArray();
+            var installer = assets.FirstOrDefault(a =>
+                a.TryGetProperty("name", out var nameProp) &&
+                nameProp.GetString()?.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) == true &&
+                nameProp.GetString()?.Contains("msys2-x86_64", StringComparison.OrdinalIgnoreCase) == true);
+
+            if (installer.ValueKind == JsonValueKind.Undefined)
+                return (FALLBACK_INSTALLER_URL, FALLBACK_INSTALLER_SHA256);
+
+            var url = installer.GetProperty("browser_download_url").GetString() ?? FALLBACK_INSTALLER_URL;
+
+            // Try to find a matching .sha256 asset to verify integrity
+            string? hash = null;
+            var installerName = installer.GetProperty("name").GetString();
+            var hashAsset = assets.FirstOrDefault(a =>
+                a.TryGetProperty("name", out var nameProp) &&
+                nameProp.GetString()?.EndsWith(".sha256", StringComparison.OrdinalIgnoreCase) == true &&
+                (installerName == null || nameProp.GetString()?.Contains(Path.GetFileNameWithoutExtension(installerName) ?? string.Empty, StringComparison.OrdinalIgnoreCase) == true));
+
+            if (hashAsset.ValueKind != JsonValueKind.Undefined)
+            {
+                var hashUrl = hashAsset.GetProperty("browser_download_url").GetString();
+                if (!string.IsNullOrEmpty(hashUrl))
+                {
+                    var hashContent = await httpClient.GetStringAsync(hashUrl);
+                    hash = ParseSha256FromFile(hashContent);
+                }
+            }
+
+            return (url, string.IsNullOrWhiteSpace(hash) ? FALLBACK_INSTALLER_SHA256 : hash);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Falling back to pinned MSYS2 installer");
+            return (FALLBACK_INSTALLER_URL, FALLBACK_INSTALLER_SHA256);
+        }
+    }
+
+    private static string? ParseSha256FromFile(string shaFileContents)
+    {
+        if (string.IsNullOrWhiteSpace(shaFileContents))
+            return null;
+
+        var firstLine = shaFileContents.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(firstLine))
+            return null;
+
+        // Typical format: "<hash> *msys2-x86_64-YYYYMMDD.exe"
+        var parts = firstLine.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+        var candidate = parts.Length > 0 ? parts[0] : null;
+        if (candidate != null && candidate.Length == 64 && candidate.All(c => Uri.IsHexDigit(c)))
+            return candidate.ToLowerInvariant();
+
+        return null;
     }
 
     private static async Task<bool> VerifyFileHashAsync(string filePath, string expectedHash)

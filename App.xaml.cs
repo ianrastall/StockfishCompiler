@@ -38,6 +38,8 @@ namespace StockfishCompiler
 
             try
             {
+                CleanupStaleTempDirectories();
+
                 base.OnStartup(e);
 
                 var services = new ServiceCollection();
@@ -116,6 +118,34 @@ namespace StockfishCompiler
                 MessageBoxImage.Error
             );
             e.Handled = true;
+        }
+
+        private static void CleanupStaleTempDirectories()
+        {
+            var tempPath = Path.GetTempPath();
+            var cutoff = DateTime.UtcNow - TimeSpan.FromHours(24);
+            var patterns = new[] { "stockfish_build_*", "sf_prof_*" };
+
+            foreach (var pattern in patterns)
+            {
+                foreach (var dir in Directory.GetDirectories(tempPath, pattern))
+                {
+                    try
+                    {
+                        var info = new DirectoryInfo(dir);
+                        var lastWrite = info.LastWriteTimeUtc;
+                        if (lastWrite < cutoff)
+                        {
+                            info.Delete(true);
+                            Log.Information("Removed stale temp directory {TempDir}", dir);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Warning(ex, "Failed to remove stale temp directory {TempDir}", dir);
+                    }
+                }
+            }
         }
     }
 }
