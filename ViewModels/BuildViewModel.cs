@@ -34,7 +34,7 @@ public partial class BuildViewModel : ObservableObject, IDisposable
         _logger.LogInformation("BuildViewModel initializing");
 
         StartBuildCommand = new AsyncRelayCommand(StartBuildAsync, () => !IsBuilding);
-        CancelBuildCommand = new RelayCommand(CancelBuild, () => IsBuilding);
+        CancelBuildCommand = new AsyncRelayCommand(CancelBuildAsync, () => IsBuilding);
 
         // Setup UI update timer to throttle output updates (4 times per second max)
         _updateTimer = new DispatcherTimer
@@ -106,7 +106,7 @@ public partial class BuildViewModel : ObservableObject, IDisposable
     private bool isBuilding = false;
 
     public IAsyncRelayCommand StartBuildCommand { get; }
-    public IRelayCommand CancelBuildCommand { get; }
+    public IAsyncRelayCommand CancelBuildCommand { get; }
 
     private void AppendOutput(string line)
     {
@@ -184,10 +184,10 @@ public partial class BuildViewModel : ObservableObject, IDisposable
         }
     }
 
-    private void CancelBuild()
+    private async Task CancelBuildAsync()
     {
         _logger.LogInformation("Build cancelled by user");
-        _buildService.CancelBuild();
+        await _buildService.CancelBuildAsync();
         AppendOutput("\n[Build cancelled by user]");
     }
 

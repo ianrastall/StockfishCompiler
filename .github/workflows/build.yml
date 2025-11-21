@@ -3,6 +3,7 @@ name: Build Windows App
 on:
   push:
     branches: [ "main", "master" ]
+    tags: [ "*" ]
   workflow_dispatch:
 
 jobs:
@@ -12,15 +13,32 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # needed to read the latest tag
+
+      - name: Determine Version from Tag
+        id: version
+        shell: pwsh
+        run: |
+          $tag = git describe --tags --abbrev=0 2>$null
+          if (-not $tag) {
+            Write-Host "No tag found, defaulting version to 0.0.0"
+            $tag = "0.0.0"
+          }
+          if ($tag.StartsWith("v")) { $tag = $tag.Substring(1) }
+          $parts = $tag.Split('.')
+          while ($parts.Count -lt 4) { $parts += "0" }
+          $assemblyVersion = ($parts -join '.')
+          Write-Host "version=$tag" >> $env:GITHUB_OUTPUT
+          Write-Host "assemblyVersion=$assemblyVersion" >> $env:GITHUB_OUTPUT
 
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '8.0.x' # Adjust if you are using .NET 6 or 7
 
-      # This uses the EXACT command you provided
       - name: Publish Single File Exe
-        run: dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true
+        run: dotnet publish -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -p:Version=${{ steps.version.outputs.version }} -p:FileVersion=${{ steps.version.outputs.assemblyVersion }} -p:AssemblyVersion=${{ steps.version.outputs.assemblyVersion }}
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4

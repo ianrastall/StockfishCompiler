@@ -9,5 +9,5 @@ public interface IBuildService
     IObservable<bool> IsBuilding { get; }
 
     Task<CompilationResult> BuildAsync(BuildConfiguration configuration);
-    void CancelBuild();
+    Task CancelBuildAsync();
 }

@@ -1,7 +1,6 @@
 using System;
 using System.Diagnostics;
 using System.IO;
-using System.Reflection;
 using System.Windows;
 using Microsoft.Extensions.DependencyInjection;
 using StockfishCompiler.ViewModels;
@@ -16,12 +15,6 @@ namespace StockfishCompiler
         public MainWindow()
         {
             InitializeComponent();
-
-            // Set version text from assembly metadata
-            var version = Assembly.GetExecutingAssembly().GetName().Version;
-            VersionText.Text = version != null
-                ? $"v{version.Major}.{version.Minor}.{version.Build}"
-                : "v1.0";
         }
 
         private void OpenLogsFolder_Click(object sender, RoutedEventArgs e)

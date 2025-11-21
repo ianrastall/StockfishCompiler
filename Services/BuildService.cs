@@ -7,13 +7,14 @@ using System.Runtime.InteropServices;
 using System.Security;
 using System.Text;
 using System.Text.RegularExpressions;
+using Microsoft.Extensions.Logging;
 using StockfishCompiler.Constants;
 using StockfishCompiler.Helpers;
 using StockfishCompiler.Models;
 
 namespace StockfishCompiler.Services;
 
-public class BuildService(IStockfishDownloader downloader) : IBuildService, IDisposable
+public class BuildService(IStockfishDownloader downloader, ILogger<BuildService> logger) : IBuildService, IDisposable
 {
     public IObservable<string> Output => _outputSubject.AsObservable();
     public IObservable<double> Progress => _progressSubject.AsObservable();
@@ -22,7 +23,10 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
     private readonly Subject<string> _outputSubject = new();
     private readonly Subject<double> _progressSubject = new();
     private readonly Subject<bool> _isBuildingSubject = new();
+    private readonly IStockfishDownloader _downloader = downloader;
+    private readonly ILogger<BuildService> _logger = logger;
     private CancellationTokenSource? _cts;
+    private Task<CompilationResult>? _activeBuildTask;
     private bool _disposed;
 
     private const int MaxOutputCharacters = 500_000; // safety cap
@@ -53,6 +57,7 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
         _isBuildingSubject.OnNext(true);
         _progressSubject.OnNext(0);
         SourceDownloadResult? downloadResult = null;
+        var buildTimer = Stopwatch.StartNew();
 
         try
         {
@@ -61,13 +66,13 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
 
             // Download source
             _outputSubject.OnNext("Downloading Stockfish source...");
-            downloadResult = await downloader.DownloadSourceAsync(configuration.SourceVersion, progress, token);
+            downloadResult = await _downloader.DownloadSourceAsync(configuration.SourceVersion, progress, token);
             var sourceDir = downloadResult.SourceDirectory;
             _progressSubject.OnNext(25);
 
             if (configuration.DownloadNetwork)
             {
-                var networkReady = await downloader.DownloadNeuralNetworkAsync(sourceDir, configuration, progress, token);
+                var networkReady = await _downloader.DownloadNeuralNetworkAsync(sourceDir, configuration, progress, token);
                 if (!networkReady)
                     _outputSubject.OnNext("Pre-download failed - make will attempt to fetch the network.");
                 _progressSubject.OnNext(networkReady ? 40 : 30);
@@ -75,7 +80,7 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
 
             ExecuteFileOperation(() =>
             {
-                if (CreatePlaceholderNetwork(sourceDir))
+                if (CreatePlaceholderNetwork(sourceDir, configuration))
                     _outputSubject.OnNext("Created placeholder network file for LTO linking.");
             }, "Placeholder network creation", critical: false);
 
@@ -107,7 +112,16 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
 
             // Compile
             _outputSubject.OnNext($"Compiling Stockfish using '{buildTarget}' target...");
-            var result = await CompileStockfishAsync(sourceDir, configuration, token, buildTarget);
+            _activeBuildTask = CompileStockfishAsync(sourceDir, configuration, token, buildTarget);
+            CompilationResult result;
+            try
+            {
+                result = await _activeBuildTask;
+            }
+            finally
+            {
+                _activeBuildTask = null;
+            }
             _progressSubject.OnNext(90);
 
             // Strip and copy
@@ -124,6 +138,7 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
             }
 
             _progressSubject.OnNext(100);
+            _logger.LogInformation("Build completed in {Duration}s with result {Success}", buildTimer.Elapsed.TotalSeconds, result.Success);
             return result;
         }
         catch (OperationCanceledException)
@@ -132,6 +147,7 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
         }
         catch (Exception ex)
         {
+            _logger.LogError(ex, "Build failed after {Duration}s", buildTimer.Elapsed.TotalSeconds);
             _outputSubject.OnNext($"Build failed: {ex.Message}");
             return new CompilationResult { Success = false, Output = ex.ToString(), ExitCode = -1 };
         }
@@ -139,10 +155,19 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
         {
             CleanupTempDirectoryWithRetry(downloadResult?.TempDirectory, "temporary Stockfish source directory");
             _isBuildingSubject.OnNext(false);
+            _cts?.Dispose();
+            _cts = null;
         }
     }
 
-    public void CancelBuild() => _cts?.Cancel();
+    public async Task CancelBuildAsync()
+    {
+        _cts?.Cancel();
+        if (_activeBuildTask != null)
+        {
+            await Task.WhenAny(_activeBuildTask, Task.Delay(5000));
+        }
+    }
 
     private async Task<CompilationResult> CompileStockfishAsync(string sourcePath, BuildConfiguration config, CancellationToken token, string buildTarget = BuildTargets.ProfileBuild)
     {
@@ -263,9 +288,32 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
 
     private void AppendOutput(StringBuilder builder, string line)
     {
+        var isError = line.Contains("error:", StringComparison.OrdinalIgnoreCase) ||
+                      line.Contains("fatal:", StringComparison.OrdinalIgnoreCase) ||
+                      line.Contains("warning:", StringComparison.OrdinalIgnoreCase);
+
+        if (builder.Length > MaxOutputCharacters && !isError)
+        {
+            var content = builder.ToString();
+            var firstNewLine = content.IndexOf('\n');
+            if (firstNewLine > 0)
+            {
+                builder.Remove(0, firstNewLine + 1);
+            }
+        }
+
         builder.AppendLine(line);
-        if (builder.Length > MaxOutputCharacters)
-            builder.Remove(0, builder.Length - MaxOutputCharacters); // trim oldest
+        while (builder.Length > MaxOutputCharacters)
+        {
+            var content = builder.ToString();
+            var idx = content.IndexOf('\n');
+            if (idx < 0)
+            {
+                builder.Clear();
+                break;
+            }
+            builder.Remove(0, idx + 1);
+        }
         _outputSubject.OnNext(line);
     }
 
@@ -325,149 +373,11 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
             ? CompilerType.MinGW 
             : config.SelectedCompiler.Type;
     }
-
-    // Note: The following Makefile/script manipulation helpers are kept for reference.
-    // They are currently not invoked because the build flow relies on verified networks
-    // plus a net.sh bypass when networks are present, which avoids mutating upstream files.
-    #region LegacyBuildTweaks
-    private static bool DisableNetDependency(string sourceDirectory)
+    private static bool CreatePlaceholderNetwork(string sourceDirectory, BuildConfiguration config)
     {
-        var makefilePath = Path.Combine(sourceDirectory, "Makefile");
-        if (!File.Exists(makefilePath)) return false;
-        
-        var lines = File.ReadAllLines(makefilePath).ToList();
-        bool changed = false;
-        
-        var targetsToPatch = new[] 
-        { 
-            BuildTargets.ProfileBuild, 
-            BuildTargets.Build, 
-            BuildTargets.ConfigSanity, 
-            BuildTargets.Analyze 
-        };
+        if (config.EnablePgo)
+            return false;
 
-        for (int i = 0; i < lines.Count; i++)
-        {
-            var trimmedLine = lines[i].TrimStart();
-            
-            // Check if this line defines one of our targets
-            foreach (var target in targetsToPatch)
-            {
-                if (trimmedLine.StartsWith($"{target}:", StringComparison.Ordinal))
-                {
-                    // Process this line and any continuations
-                    var lineIndicesToProcess = new List<int> { i };
-                    
-                    // Collect all lines that are part of this rule (handle line continuations)
-                    int j = i;
-                    while (j < lines.Count && lines[j].TrimEnd().EndsWith("\\", StringComparison.Ordinal))
-                    {
-                        j++;
-                        if (j < lines.Count)
-                        {
-                            lineIndicesToProcess.Add(j);
-                        }
-                    }
-                    
-                    // Remove 'net' from all collected lines
-                    foreach (var lineIdx in lineIndicesToProcess)
-                    {
-                        var line = lines[lineIdx];
-                        
-                        // Remove 'net' as a standalone dependency
-                        // Match patterns: " net ", " net\", "net ", " net", or ":net"
-                        if (line.Contains(" net ") || 
-                            line.Contains(" net\\") ||
-                            line.Contains($":{target.Split(':')[0]} net") ||
-                            line.TrimEnd().EndsWith(" net"))
-                        {
-                            // Replace multiple patterns
-                            var newLine = line
-                                .Replace(" net ", " ")
-                                .Replace(" net\\", "\\")
-                                .Replace(" net\t", " ")
-                                .Replace("\tnet ", "\t")
-                                .Replace("\tnet\t", "\t");
-                            
-                            // Handle 'net' at the end of line (before potential backslash)
-                            if (newLine.TrimEnd('\\').TrimEnd().EndsWith(" net"))
-                            {
-                                var endsWithBackslash = newLine.TrimEnd().EndsWith("\\");
-                                newLine = newLine.TrimEnd('\\').TrimEnd();
-                                newLine = newLine.Substring(0, newLine.Length - 4); // Remove " net"
-                                if (endsWithBackslash)
-                                {
-                                    newLine += " \\";
-                                }
-                            }
-                            
-                            if (newLine != line)
-                            {
-                                lines[lineIdx] = newLine;
-                                changed = true;
-                            }
-                        }
-                    }
-                    
-                    break; // Move to next line after processing this target
-                }
-            }
-        }
-        
-        if (changed)
-        {
-            File.WriteAllLines(makefilePath, lines);
-            return true;
-        }
-        
-        return false;
-    }
-
-    private bool NeutralizeNetScript(string rootDirectory)
-    {
-        if (string.IsNullOrWhiteSpace(rootDirectory)) return false;
-        var scriptPath = Path.Combine(rootDirectory, "scripts", "net.sh");
-        if (!File.Exists(scriptPath)) return false;
-        var scriptContent = """
-#!/bin/sh
-echo "Skipping Stockfish net target - neural networks pre-downloaded."
-exit 0
-""";
-        File.WriteAllText(scriptPath, scriptContent.Replace("\r\n", "\n"));
-        return true;
-    }
-
-    private static bool PatchMakefileSaveTemps(string sourceDirectory)
-    {
-        var makefilePath = Path.Combine(sourceDirectory, "Makefile");
-        if (!File.Exists(makefilePath)) return false;
-        
-        var content = File.ReadAllText(makefilePath);
-        var originalContent = content;
-        
-        // Remove -save-temps flag (as a standalone word, not adjacent whitespace)
-        // Uses lookbehind (?<=\s) to ensure preceded by whitespace
-        // Uses lookahead (?=\s|$) to ensure followed by whitespace or end of line
-        // This preserves Makefile syntax and line continuations
-        content = System.Text.RegularExpressions.Regex.Replace(
-            content,
-            @"(?<=\s)-save-temps(?=\s|$)",
-            "",
-            System.Text.RegularExpressions.RegexOptions.Multiline
-        );
-        
-        if (content != originalContent)
-        {
-            File.WriteAllText(makefilePath, content);
-            return true;
-        }
-        
-        return false;
-    }
-    #endregion
-
-    private static bool CreatePlaceholderNetwork(string sourceDirectory)
-    {
         // If valid networks are already present, nothing to do.
         if (Directory.GetFiles(sourceDirectory, "*.nnue").Any())
             return false;
@@ -600,7 +510,7 @@ exit 0
 
     private static int SanitizeParallelJobs(int jobs)
     {
-        var max = Environment.ProcessorCount * 2;
+        var max = Math.Min(Environment.ProcessorCount * 2, 32);
         if (jobs < 1) return 1;
         if (jobs > max) return max;
         return jobs;
@@ -633,39 +543,63 @@ exit 0
         if (string.IsNullOrWhiteSpace(outputDirectory)) 
             throw new SecurityException("Output directory not specified");
 
-        var baseName = Path.GetFileName(filename);
-        if (!string.Equals(baseName, filename, StringComparison.Ordinal)) 
-            throw new SecurityException("Invalid output file name");
-        if (baseName.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0) 
-            throw new SecurityException("Invalid characters in output file name");
+        var safeFilename = Path.GetFileName(filename);
+        if (string.IsNullOrEmpty(safeFilename) || safeFilename.Length > 100)
+            throw new SecurityException("Invalid filename");
 
-        var ext = Path.GetExtension(baseName);
-        if (!string.IsNullOrEmpty(ext) && !ext.Equals(".exe", StringComparison.OrdinalIgnoreCase))
-            throw new SecurityException("Disallowed file extension");
+        var invalidChars = Path.GetInvalidFileNameChars();
+        if (safeFilename.Any(c => invalidChars.Contains(c)))
+            throw new SecurityException("Filename contains invalid characters");
 
-        var baseDir = new DirectoryInfo(Path.GetFullPath(outputDirectory));
-        var systemDirs = new[]
+        var rootDir = Path.GetFullPath(outputDirectory);
+        var allowedRoots = new[]
         {
-            Environment.GetFolderPath(Environment.SpecialFolder.System),
-            Environment.GetFolderPath(Environment.SpecialFolder.Windows),
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86)
-        };
-        
-        if (systemDirs.Any(d => !string.IsNullOrEmpty(d) && baseDir.FullName.StartsWith(d, StringComparison.OrdinalIgnoreCase)))
-            throw new SecurityException("Refusing to write into system directory");
+            Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
+            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            Path.Combine(Path.GetTempPath(), "StockfishCompiler")
+        }.Where(p => !string.IsNullOrWhiteSpace(p))
+         .Select(Path.GetFullPath)
+         .ToList();
 
-        Directory.CreateDirectory(baseDir.FullName);
-        
-        var fullPath = Path.GetFullPath(Path.Combine(baseDir.FullName, baseName));
-        var targetFile = new FileInfo(fullPath);
-        var targetDir = targetFile.DirectoryName;
-        
-        // Improved path traversal check using canonicalized paths
-        if (targetDir == null || !string.Equals(targetDir, baseDir.FullName, StringComparison.OrdinalIgnoreCase))
-            throw new SecurityException("Path traversal detected");
-            
-        return fullPath;
+        bool IsUnderRoot(string path, string root)
+        {
+            var normalizedRoot = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+            if (!path.StartsWith(normalizedRoot, StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            return path.Length == normalizedRoot.Length ||
+                   path[normalizedRoot.Length] == Path.DirectorySeparatorChar ||
+                   path[normalizedRoot.Length] == Path.AltDirectorySeparatorChar;
+        }
+
+        if (!allowedRoots.Any(r => IsUnderRoot(rootDir, r)))
+        {
+            var systemDirs = new[]
+            {
+                Environment.GetFolderPath(Environment.SpecialFolder.System),
+                Environment.GetFolderPath(Environment.SpecialFolder.Windows),
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86)
+            }.Where(p => !string.IsNullOrWhiteSpace(p)).Select(Path.GetFullPath).ToList();
+
+            if (systemDirs.Any(r => IsUnderRoot(rootDir, r)))
+                throw new SecurityException("Output directory cannot be a system directory");
+
+            try
+            {
+                Directory.CreateDirectory(rootDir);
+            }
+            catch (Exception ex)
+            {
+                throw new SecurityException($"Output directory is not accessible: {ex.Message}");
+            }
+
+            return Path.Combine(rootDir, safeFilename);
+        }
+
+        Directory.CreateDirectory(rootDir);
+        return Path.Combine(rootDir, safeFilename);
     }
 
     public void Dispose()

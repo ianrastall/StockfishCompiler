@@ -21,4 +21,5 @@ public class SourceDownloadResult
     public string SourceDirectory { get; set; } = string.Empty;
     public string RootDirectory { get; set; } = string.Empty;
     public string TempDirectory { get; set; } = string.Empty;
+    public string? ExpectedSha256 { get; set; }
 }

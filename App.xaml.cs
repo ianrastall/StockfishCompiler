@@ -1,8 +1,10 @@
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Serilog;
+using System.Diagnostics;
 using System.IO;
 using System.Net.Http;
+using System.Linq;
 using System.Windows;
 using StockfishCompiler.Services;
 using StockfishCompiler.ViewModels;
@@ -118,29 +120,57 @@ namespace StockfishCompiler
 
         private static void CleanupStaleTempDirectories()
         {
-            var tempPath = Path.GetTempPath();
-            var cutoff = DateTime.UtcNow - TimeSpan.FromHours(24);
             var patterns = new[] { "stockfish_build_*", "sf_prof_*" };
+            var cutoff = DateTime.UtcNow - TimeSpan.FromHours(24);
+            var sentinelDir = Path.Combine(Path.GetTempPath(), $"sf_sentinel_{Process.GetCurrentProcess().Id}");
 
-            foreach (var pattern in patterns)
+            try
             {
-                foreach (var dir in Directory.GetDirectories(tempPath, pattern))
+                Directory.CreateDirectory(sentinelDir);
+
+                foreach (var pattern in patterns)
                 {
-                    try
+                    foreach (var dir in Directory.GetDirectories(Path.GetTempPath(), pattern))
                     {
-                        var info = new DirectoryInfo(dir);
-                        var lastWrite = info.LastWriteTimeUtc;
-                        if (lastWrite < cutoff)
+                        try
                         {
-                            info.Delete(true);
-                            Log.Information("Removed stale temp directory {TempDir}", dir);
+                            var info = new DirectoryInfo(dir);
+                            var hasActiveSentinel = Directory.GetDirectories(Path.GetTempPath(), "sf_sentinel_*")
+                                .Where(s => !s.Equals(sentinelDir, StringComparison.OrdinalIgnoreCase))
+                                .Any(IsDirectoryLockedByProcess);
+
+                            if (!hasActiveSentinel && info.LastWriteTimeUtc < cutoff)
+                            {
+                                info.Delete(true);
+                                Log.Information("Removed stale temp directory {TempDir}", dir);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Log.Warning(ex, "Failed to remove stale temp directory {TempDir}", dir);
                         }
                     }
-                    catch (Exception ex)
-                    {
-                        Log.Warning(ex, "Failed to remove stale temp directory {TempDir}", dir);
-                    }
                 }
+            }
+            finally
+            {
+                try { Directory.Delete(sentinelDir, true); } catch { }
+            }
+        }
+
+        private static bool IsDirectoryLockedByProcess(string sentinelPath)
+        {
+            try
+            {
+                var processIdStr = Path.GetFileName(sentinelPath).Replace("sf_sentinel_", "");
+                if (!int.TryParse(processIdStr, out var pid)) return false;
+
+                using var process = Process.GetProcessById(pid);
+                return process != null && process.StartTime < DateTime.Now;
+            }
+            catch
+            {
+                return false; // Process doesn't exist
             }
         }
     }

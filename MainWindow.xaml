@@ -16,10 +16,7 @@
         </Grid.RowDefinitions>
 
         <Border Grid.Row="0" Background="{StaticResource PrimaryBrush}" Padding="20,15" BorderBrush="{StaticResource BorderBrush}" BorderThickness="0,0,0,1">
-            <StackPanel Orientation="Horizontal">
-                <TextBlock Text="Stockfish Compiler" FontSize="24" FontWeight="Bold" Foreground="{StaticResource TextPrimaryBrush}"/>
-                <TextBlock x:Name="VersionText" Text="v1.0" Margin="10,5,0,0" Foreground="{StaticResource TextSecondaryBrush}" VerticalAlignment="Bottom"/>
-            </StackPanel>
+            <TextBlock Text="Stockfish Compiler" FontSize="24" FontWeight="Bold" Foreground="{StaticResource TextPrimaryBrush}"/>
         </Border>
 
         <TabControl Grid.Row="1" Style="{StaticResource DarkTabControl}">

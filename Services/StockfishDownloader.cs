@@ -3,6 +3,7 @@ using System.IO.Compression;
 using System.Net.Http;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Security;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using StockfishCompiler.Helpers;
@@ -73,6 +74,18 @@ public class StockfishDownloader : IStockfishDownloader
 
         await SafeDownloadToFileAsync(url, zipPath, progress, cancellationToken);
 
+        var downloadResult = new SourceDownloadResult
+        {
+            TempDirectory = tempDir
+        };
+
+        if (!string.IsNullOrEmpty(downloadResult.ExpectedSha256))
+        {
+            progress?.Report("Verifying source integrity...");
+            if (!await VerifyFileHashAsync(zipPath, downloadResult.ExpectedSha256))
+                throw new SecurityException("Source code hash mismatch - possible tampering");
+        }
+
         progress?.Report("Extracting source code...");
         SafeExtractToDirectory(zipPath, tempDir);
 
@@ -86,12 +99,9 @@ public class StockfishDownloader : IStockfishDownloader
             throw new Exception($"Source directory not found: {sourceDir}");
 
         progress?.Report($"Source extracted to: {sourceDir}");
-        return new SourceDownloadResult
-        {
-            SourceDirectory = sourceDir,
-            RootDirectory = rootDir,
-            TempDirectory = tempDir
-        };
+        downloadResult.SourceDirectory = sourceDir;
+        downloadResult.RootDirectory = rootDir;
+        return downloadResult;
     }
 
     public async Task<bool> DownloadNeuralNetworkAsync(string sourceDirectory, BuildConfiguration? config = null, IProgress<string>? progress = null, CancellationToken cancellationToken = default)
@@ -260,5 +270,14 @@ public class StockfishDownloader : IStockfishDownloader
     {
         if (_httpClient.DefaultRequestHeaders.UserAgent.Count == 0)
             _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("StockfishCompiler/1.0");
+    }
+
+    private static async Task<bool> VerifyFileHashAsync(string filePath, string expectedSha256)
+    {
+        var normalizedExpected = expectedSha256.Replace(" ", string.Empty).ToLowerInvariant();
+        using var sha256 = SHA256.Create();
+        await using var stream = File.OpenRead(filePath);
+        var hash = Convert.ToHexString(await sha256.ComputeHashAsync(stream)).ToLowerInvariant();
+        return hash.Equals(normalizedExpected, StringComparison.OrdinalIgnoreCase);
     }
 }

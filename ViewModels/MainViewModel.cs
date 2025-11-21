@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Microsoft.Extensions.Logging;
@@ -19,6 +20,7 @@ public partial class MainViewModel : ObservableObject
     private UserSettings _userSettings = new();
     private bool _isRestoringSettings;
     private bool _isAdjustingParallelJobs;
+    private CancellationTokenSource? _saveDebouncer;
 
     public MainViewModel(
         ICompilerService compilerService, 
@@ -229,14 +231,24 @@ public partial class MainViewModel : ObservableObject
         if (_isRestoringSettings)
             return;
 
-        _userSettings.DownloadNetwork = DownloadNetwork;
-        _userSettings.StripExecutable = StripExecutable;
-        _userSettings.EnablePgo = EnablePgo;
-        _userSettings.ParallelJobs = ParallelJobs;
-        _userSettings.OutputDirectory = OutputDirectory;
-        _userSettings.SourceVersion = SourceVersion;
+        _saveDebouncer?.Cancel();
+        _saveDebouncer = new CancellationTokenSource();
 
-        _userSettingsService.Save(_userSettings);
+        Task.Delay(500, _saveDebouncer.Token)
+            .ContinueWith(t =>
+            {
+                if (t.IsCanceled)
+                    return;
+
+                _userSettings.DownloadNetwork = DownloadNetwork;
+                _userSettings.StripExecutable = StripExecutable;
+                _userSettings.EnablePgo = EnablePgo;
+                _userSettings.ParallelJobs = ParallelJobs;
+                _userSettings.OutputDirectory = OutputDirectory;
+                _userSettings.SourceVersion = SourceVersion;
+
+                _userSettingsService.Save(_userSettings);
+            }, TaskScheduler.Default);
     }
 
     partial void OnDownloadNetworkChanged(bool value) => PersistUserSettings();
@@ -247,7 +259,7 @@ public partial class MainViewModel : ObservableObject
         if (_isRestoringSettings || _isAdjustingParallelJobs)
             return;
 
-        var maxJobs = Environment.ProcessorCount * 4;
+        var maxJobs = Math.Min(Environment.ProcessorCount * 2, 32);
         var clampedValue = Math.Clamp(value, 1, maxJobs);
 
         if (value != clampedValue)

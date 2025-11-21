@@ -107,18 +107,25 @@ public class ArchitectureDetector : IArchitectureDetector
         var psi = new ProcessStartInfo
         {
             FileName = exe,
-            Arguments = "-Q -march=native --help=target",
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            RedirectStandardInput = true,
             UseShellExecute = false,
             CreateNoWindow = true
         };
 
         // Force C (English) locale to ensure output parsing works on non-English systems
-        psi.EnvironmentVariables["LC_ALL"] = "C";
-        psi.EnvironmentVariables["LANG"] = "C";
+        var env = SetupEnvironmentForMSYS2(compiler.Path);
+        env["LC_ALL"] = "C";
+        env["LANG"] = "C";
+        foreach (var kvp in env)
+        {
+            psi.EnvironmentVariables[kvp.Key] = kvp.Value;
+        }
 
-        SetupEnvironmentForMSYS2(psi, compiler.Path);
+        psi.ArgumentList.Add("-Q");
+        psi.ArgumentList.Add("-march=native");
+        psi.ArgumentList.Add("--help=target");
 
         using var process = Process.Start(psi);
         if (process == null)
@@ -194,7 +201,6 @@ public class ArchitectureDetector : IArchitectureDetector
         var psi = new ProcessStartInfo
         {
             FileName = exe,
-            Arguments = "-E - -march=native -###",
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -202,10 +208,18 @@ public class ArchitectureDetector : IArchitectureDetector
         };
 
         // Force C (English) locale to ensure output parsing works on non-English systems
-        psi.EnvironmentVariables["LC_ALL"] = "C";
-        psi.EnvironmentVariables["LANG"] = "C";
+        var env = SetupEnvironmentForMSYS2(compiler.Path);
+        env["LC_ALL"] = "C";
+        env["LANG"] = "C";
+        foreach (var kvp in env)
+        {
+            psi.EnvironmentVariables[kvp.Key] = kvp.Value;
+        }
 
-        SetupEnvironmentForMSYS2(psi, compiler.Path);
+        psi.ArgumentList.Add("-E");
+        psi.ArgumentList.Add("-");
+        psi.ArgumentList.Add("-march=native");
+        psi.ArgumentList.Add("-###");
 
         using var process = Process.Start(psi);
         if (process == null)
@@ -213,6 +227,7 @@ public class ArchitectureDetector : IArchitectureDetector
             _logger.LogWarning("Failed to start Clang process for feature detection");
             return (X64BaseFeatures.ToList(), "unknown");
         }
+        process.StandardInput.Close();
 
         var stdoutTask = process.StandardOutput.ReadToEndAsync();
         var stderrTask = process.StandardError.ReadToEndAsync();
@@ -255,19 +270,27 @@ public class ArchitectureDetector : IArchitectureDetector
         return (distinct, cpuName);
     }
 
-    private void SetupEnvironmentForMSYS2(ProcessStartInfo psi, string compilerPath)
+    private Dictionary<string, string> SetupEnvironmentForMSYS2(string compilerPath)
     {
+        var env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (System.Collections.DictionaryEntry entry in Environment.GetEnvironmentVariables())
+        {
+            if (entry.Key is string key && entry.Value is string value)
+                env[key] = value;
+        }
+
         if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            return;
+            return env;
+
+        if (string.IsNullOrWhiteSpace(compilerPath))
+            return env;
 
         var compilerDir = new DirectoryInfo(compilerPath);
         var msys2Root = compilerDir.Parent?.Parent;
 
         if (msys2Root != null && msys2Root.Exists)
         {
-            var pathsToAdd = new List<string>();
-
-            pathsToAdd.Add(compilerPath);
+            var pathsToAdd = new List<string> { compilerPath };
 
             var usrBin = Path.Combine(msys2Root.FullName, "usr", "bin");
             var mingw64Bin = Path.Combine(msys2Root.FullName, "mingw64", "bin");
@@ -280,9 +303,9 @@ public class ArchitectureDetector : IArchitectureDetector
             if (Directory.Exists(mingw32Bin))
                 pathsToAdd.Add(mingw32Bin);
 
-            var currentPath = Environment.GetEnvironmentVariable("PATH") ?? string.Empty;
+            var currentPath = env.GetValueOrDefault("PATH", string.Empty);
             var newPath = string.Join(";", pathsToAdd) + ";" + currentPath;
-            psi.EnvironmentVariables["PATH"] = newPath;
+            env["PATH"] = newPath;
             
             _logger.LogDebug("Set up MSYS2 environment with paths: {Paths}", string.Join("; ", pathsToAdd));
         }
@@ -290,6 +313,8 @@ public class ArchitectureDetector : IArchitectureDetector
         {
             _logger.LogDebug("MSYS2 root not found for compiler path: {Path}", compilerPath);
         }
+
+        return env;
     }
 
     private static string DetermineOptimalArchitecture(List<string> features, string cpuName)
