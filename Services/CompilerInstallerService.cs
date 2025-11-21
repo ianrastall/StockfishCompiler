@@ -120,27 +120,29 @@ public class CompilerInstallerService(ILogger<CompilerInstallerService> logger, 
                     return (false, string.Empty);
                 }
                 
-            logger.LogInformation("Installer checksum verified successfully");
-            progress?.Report("Installer verified. Starting installation...");
-        }
-        else
-        {
-            logger.LogWarning("Skipping checksum verification because no hash was available for the installer");
-            progress?.Report("Installer downloaded (checksum unavailable). Proceeding with installation...");
-        }
+                logger.LogInformation("Installer checksum verified successfully");
+                progress?.Report("Installer verified. Starting installation...");
+            }
+            else
+            {
+                logger.LogWarning("Skipping checksum verification because no hash was available for the installer");
+                progress?.Report("Installer downloaded (checksum unavailable). Proceeding with installation...");
+            }
 
             // Run the installer silently
-            var installArgs = $"install --root \"{installPath}\" --confirm-command";
-            
             var startInfo = new ProcessStartInfo
             {
                 FileName = tempPath,
-                Arguments = installArgs,
                 UseShellExecute = false,
                 CreateNoWindow = true,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true
             };
+
+            startInfo.ArgumentList.Add("install");
+            startInfo.ArgumentList.Add("--root");
+            startInfo.ArgumentList.Add(installPath);
+            startInfo.ArgumentList.Add("--confirm-command");
 
             using var process = Process.Start(startInfo);
             if (process == null)

@@ -623,6 +623,9 @@ exit 0
             throw new SecurityException("Disallowed file extension");
 
         var baseDir = new DirectoryInfo(Path.GetFullPath(outputDirectory));
+        var secureBaseDirPath = Path.EndsInDirectorySeparator(baseDir.FullName)
+            ? baseDir.FullName
+            : baseDir.FullName + Path.DirectorySeparatorChar;
         var systemDirs = new[]
         {
             Environment.GetFolderPath(Environment.SpecialFolder.System),
@@ -640,7 +643,7 @@ exit 0
         var targetFile = new FileInfo(fullPath);
         
         // Improved path traversal check using canonicalized paths
-        if (targetFile.DirectoryName == null || !targetFile.DirectoryName.StartsWith(baseDir.FullName, StringComparison.OrdinalIgnoreCase))
+        if (targetFile.DirectoryName == null || !targetFile.DirectoryName.StartsWith(secureBaseDirPath, StringComparison.OrdinalIgnoreCase))
             throw new SecurityException("Path traversal detected");
             
         return fullPath;

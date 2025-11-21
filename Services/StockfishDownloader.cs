@@ -191,6 +191,8 @@ public class StockfishDownloader : IStockfishDownloader
     {
         using var archive = ZipFile.OpenRead(zipPath);
         var destDirFullPath = Path.GetFullPath(destinationDirectory);
+        if (!Path.EndsInDirectorySeparator(destDirFullPath))
+            destDirFullPath += Path.DirectorySeparatorChar;
 
         foreach (var entry in archive.Entries)
         {
