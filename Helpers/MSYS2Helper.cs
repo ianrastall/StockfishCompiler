@@ -17,7 +17,7 @@ public static class MSYS2Helper
 
     public static string? FindMSYS2Installation()
     {
-        return GetCommonMSYS2Paths().FirstOrDefault(Directory.Exists);
+        return GetCommonMSYS2Paths().FirstOrDefault(IsValidMSYS2Installation);
     }
 
     public static string? FindMakeExecutable(string? compilerPath = null)
@@ -31,7 +31,7 @@ public static class MSYS2Helper
             var compilerDir = new DirectoryInfo(compilerPath);
             var msys2Root = compilerDir.Parent?.Parent;
             
-            if (msys2Root != null && msys2Root.Exists)
+            if (msys2Root != null && msys2Root.Exists && IsValidMSYS2Installation(msys2Root.FullName))
             {
                 var makePaths = new[]
                 {
@@ -93,7 +93,7 @@ public static class MSYS2Helper
             var compilerDir = new DirectoryInfo(config.SelectedCompiler.Path);
             var msys2Root = compilerDir.Parent?.Parent;
             
-            if (msys2Root != null && msys2Root.Exists)
+            if (msys2Root != null && msys2Root.Exists && IsValidMSYS2Installation(msys2Root.FullName))
             {
                 AddMSYS2PathsToList(msys2Root.FullName, pathsToAdd);
             }
@@ -128,5 +128,17 @@ public static class MSYS2Helper
             pathsToAdd.Add(usrBin);
         if (Directory.Exists(mingw64Bin))
             pathsToAdd.Add(mingw64Bin);
+    }
+
+    public static bool IsValidMSYS2Installation(string path)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path))
+            return false;
+
+        var usrBin = Path.Combine(path, "usr", "bin");
+        var makeExe = Path.Combine(usrBin, "make.exe");
+        var mingw64 = Path.Combine(path, "mingw64");
+
+        return Directory.Exists(usrBin) && Directory.Exists(mingw64) && File.Exists(makeExe);
     }
 }

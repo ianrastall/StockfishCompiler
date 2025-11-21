@@ -30,11 +30,24 @@ public class UserSettingsService : IUserSettingsService
             if (File.Exists(_settingsPath))
             {
                 var json = File.ReadAllText(_settingsPath);
+                try
+                {
+                    using var doc = JsonDocument.Parse(json);
+                    if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                        throw new JsonException("Settings root must be an object");
+                }
+                catch (JsonException ex)
+                {
+                    _logger.LogWarning(ex, "Settings file corrupted, resetting to defaults");
+                    File.Delete(_settingsPath);
+                    var sanitizedDefaults = Sanitize(new UserSettings());
+                    Save(sanitizedDefaults);
+                    return sanitizedDefaults;
+                }
+
                 var settings = JsonSerializer.Deserialize<UserSettings>(json);
                 if (settings != null)
-                {
                     return Sanitize(settings);
-                }
             }
         }
         catch (Exception ex)

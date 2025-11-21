@@ -1,6 +1,10 @@
-﻿using System.Diagnostics;
+using System;
+using System.Diagnostics;
 using System.IO;
+using System.Reflection;
 using System.Windows;
+using Microsoft.Extensions.DependencyInjection;
+using StockfishCompiler.ViewModels;
 
 namespace StockfishCompiler
 {
@@ -12,6 +16,12 @@ namespace StockfishCompiler
         public MainWindow()
         {
             InitializeComponent();
+
+            // Set version text from assembly metadata
+            var version = Assembly.GetExecutingAssembly().GetName().Version;
+            VersionText.Text = version != null
+                ? $"v{version.Major}.{version.Minor}.{version.Build}"
+                : "v1.0";
         }
 
         private void OpenLogsFolder_Click(object sender, RoutedEventArgs e)
@@ -33,6 +43,44 @@ namespace StockfishCompiler
                     "Logs",
                     MessageBoxButton.OK,
                     MessageBoxImage.Information
+                );
+            }
+        }
+
+        private void CopyBuildOutput_Click(object sender, RoutedEventArgs e)
+        {
+            try
+            {
+                var buildVm = App.Services?.GetService<BuildViewModel>();
+                var output = buildVm?.BuildOutput;
+
+                if (!string.IsNullOrWhiteSpace(output))
+                {
+                    Clipboard.SetText(output);
+                    MessageBox.Show(
+                        "Build output copied to clipboard.",
+                        "Copy Output",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information
+                    );
+                }
+                else
+                {
+                    MessageBox.Show(
+                        "No build output available yet. Start a build first.",
+                        "Copy Output",
+                        MessageBoxButton.OK,
+                        MessageBoxImage.Information
+                    );
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show(
+                    $"Failed to copy output:\n{ex.Message}",
+                    "Copy Output",
+                    MessageBoxButton.OK,
+                    MessageBoxImage.Error
                 );
             }
         }

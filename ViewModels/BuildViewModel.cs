@@ -21,6 +21,7 @@ public partial class BuildViewModel : ObservableObject, IDisposable
     private readonly DispatcherTimer _updateTimer;
     private int _isDirty = 0;
     private readonly object _logLock = new();
+    private bool _disposed;
 
     private const int MaxOutputLines = 1000;
 
@@ -44,10 +45,12 @@ public partial class BuildViewModel : ObservableObject, IDisposable
         {
             if (Interlocked.Exchange(ref _isDirty, 0) == 1)
             {
+                string output;
                 lock (_logLock)
                 {
-                    BuildOutput = string.Join(Environment.NewLine, _logQueue);
+                    output = string.Join(Environment.NewLine, _logQueue);
                 }
+                BuildOutput = output;
             }
         };
         _updateTimer.Start();
@@ -57,23 +60,38 @@ public partial class BuildViewModel : ObservableObject, IDisposable
         
         _subscriptions.Add(_buildService.Output
             .ObserveOn(uiScheduler)
-            .Subscribe(line => 
-            {
-                AppendOutput(line);
-            }));
+            .Subscribe(
+                onNext: line => AppendOutput(line),
+                onError: ex =>
+                {
+                    _logger.LogError(ex, "Error in build output stream");
+                    AppendOutput($"[Error: {ex.Message}]");
+                }));
 
         _subscriptions.Add(_buildService.Progress
             .ObserveOn(uiScheduler)
-            .Subscribe(p => BuildProgress = p));
+            .Subscribe(
+                onNext: p => BuildProgress = p,
+                onError: ex =>
+                {
+                    _logger.LogError(ex, "Error in build progress stream");
+                    AppendOutput($"[Error updating progress: {ex.Message}]");
+                }));
         
         _subscriptions.Add(_buildService.IsBuilding
             .ObserveOn(uiScheduler)
-            .Subscribe(b => 
-            {
-                IsBuilding = b;
-                StartBuildCommand.NotifyCanExecuteChanged();
-                CancelBuildCommand.NotifyCanExecuteChanged();
-            }));
+            .Subscribe(
+                onNext: b =>
+                {
+                    IsBuilding = b;
+                    StartBuildCommand.NotifyCanExecuteChanged();
+                    CancelBuildCommand.NotifyCanExecuteChanged();
+                },
+                onError: ex =>
+                {
+                    _logger.LogError(ex, "Error in build state stream");
+                    AppendOutput($"[Error updating build state: {ex.Message}]");
+                }));
 
         _logger.LogInformation("BuildViewModel initialized");
     }
@@ -175,6 +193,9 @@ public partial class BuildViewModel : ObservableObject, IDisposable
 
     public void Dispose()
     {
+        if (_disposed) return;
+        _disposed = true;
+
         _updateTimer?.Stop();
         
         foreach (var sub in _subscriptions)

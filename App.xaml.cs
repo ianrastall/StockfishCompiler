@@ -52,22 +52,17 @@ namespace StockfishCompiler
                 });
 
                 // Configure HttpClient properly with timeout and user agent
-                services.AddSingleton<HttpClient>(sp =>
+                services.AddHttpClient<IStockfishDownloader, StockfishDownloader>(client =>
                 {
-                    var client = new HttpClient
-                    {
-                        Timeout = TimeSpan.FromMinutes(10)
-                    };
+                    client.Timeout = TimeSpan.FromMinutes(10);
                     client.DefaultRequestHeaders.UserAgent.ParseAdd("StockfishCompiler/1.0");
-                    return client;
                 });
-                services.AddSingleton<IStockfishDownloader, StockfishDownloader>();
 
                 // Services
                 services.AddSingleton<ICompilerService, CompilerService>();
                 services.AddSingleton<ICompilerInstallerService, CompilerInstallerService>();
                 services.AddSingleton<IArchitectureDetector, ArchitectureDetector>();
-                services.AddTransient<IBuildService, BuildService>(); // Transient to avoid state corruption between builds
+                services.AddSingleton<IBuildService, BuildService>(); // Singleton to match BuildViewModel lifetime
                 services.AddSingleton<IUserSettingsService, UserSettingsService>();
 
                 // ViewModels
@@ -104,6 +99,7 @@ namespace StockfishCompiler
         protected override void OnExit(ExitEventArgs e)
         {
             Log.Information("Application exiting with code {ExitCode}", e.ApplicationExitCode);
+            Services?.Dispose();
             Log.CloseAndFlush();
             base.OnExit(e);
         }

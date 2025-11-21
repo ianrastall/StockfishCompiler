@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.IO;
+using System.Threading;
 using Microsoft.Extensions.Logging;
 using StockfishCompiler.Models;
 
@@ -17,11 +18,11 @@ public class ArchitectureDetector : IArchitectureDetector
         _logger = logger;
     }
 
-    public async Task<ArchitectureInfo> DetectOptimalArchitectureAsync(CompilerInfo compiler)
+    public async Task<ArchitectureInfo> DetectOptimalArchitectureAsync(CompilerInfo compiler, CancellationToken cancellationToken = default)
     {
         try
         {
-            var (features, detectedCpu) = await DetectCPUFeaturesDetailedAsync(compiler);
+            var (features, detectedCpu) = await DetectCPUFeaturesDetailedAsync(compiler, cancellationToken);
             _logger.LogDebug("Detected {Count} CPU features: {Features}", features.Count, string.Join(", ", features));
             _logger.LogDebug("Detected CPU name: {CpuName}", detectedCpu);
             
@@ -61,13 +62,13 @@ public class ArchitectureDetector : IArchitectureDetector
         }
     }
 
-    public async Task<List<string>> DetectCPUFeaturesAsync(CompilerInfo compiler)
+    public async Task<List<string>> DetectCPUFeaturesAsync(CompilerInfo compiler, CancellationToken cancellationToken = default)
     {
-        var (features, _) = await DetectCPUFeaturesDetailedAsync(compiler);
+        var (features, _) = await DetectCPUFeaturesDetailedAsync(compiler, cancellationToken);
         return features;
     }
 
-    private async Task<(List<string> Features, string CpuName)> DetectCPUFeaturesDetailedAsync(CompilerInfo compiler)
+    private async Task<(List<string> Features, string CpuName)> DetectCPUFeaturesDetailedAsync(CompilerInfo compiler, CancellationToken cancellationToken)
     {
         try
         {
@@ -80,12 +81,12 @@ public class ArchitectureDetector : IArchitectureDetector
             if (compiler.Type is "gcc" or "mingw")
             {
                 _logger.LogDebug("Using GCC feature detection for {Compiler}", compiler.DisplayName);
-                return await DetectGccFeaturesAsync(compiler);
+                return await DetectGccFeaturesAsync(compiler, cancellationToken);
             }
             if (compiler.Type == "clang")
             {
                 _logger.LogDebug("Using Clang feature detection for {Compiler}", compiler.DisplayName);
-                return await DetectClangFeaturesAsync(compiler);
+                return await DetectClangFeaturesAsync(compiler, cancellationToken);
             }
             
             _logger.LogWarning("Unknown compiler type: {Type}, using fallback", compiler.Type);
@@ -98,7 +99,7 @@ public class ArchitectureDetector : IArchitectureDetector
         return GetFallbackFeatures();
     }
 
-    private async Task<(List<string> Features, string CpuName)> DetectGccFeaturesAsync(CompilerInfo compiler)
+    private async Task<(List<string> Features, string CpuName)> DetectGccFeaturesAsync(CompilerInfo compiler, CancellationToken cancellationToken)
     {
         var exe = Path.Combine(compiler.Path, compiler.Name);
         _logger.LogDebug("Running GCC detection: {Exe} -Q -march=native --help=target", exe);
@@ -129,7 +130,7 @@ public class ArchitectureDetector : IArchitectureDetector
         var stdoutTask = process.StandardOutput.ReadToEndAsync();
         var stderrTask = process.StandardError.ReadToEndAsync();
         
-        await process.WaitForExitAsync();
+        await process.WaitForExitAsync(cancellationToken);
         
         var stdout = await stdoutTask;
         var stderr = await stderrTask;
@@ -185,7 +186,7 @@ public class ArchitectureDetector : IArchitectureDetector
         return (distinct, cpuName);
     }
 
-    private async Task<(List<string> Features, string CpuName)> DetectClangFeaturesAsync(CompilerInfo compiler)
+    private async Task<(List<string> Features, string CpuName)> DetectClangFeaturesAsync(CompilerInfo compiler, CancellationToken cancellationToken)
     {
         var exe = Path.Combine(compiler.Path, compiler.Name);
         _logger.LogDebug("Running Clang detection: {Exe} -E - -march=native -###", exe);
@@ -216,7 +217,7 @@ public class ArchitectureDetector : IArchitectureDetector
         var stdoutTask = process.StandardOutput.ReadToEndAsync();
         var stderrTask = process.StandardError.ReadToEndAsync();
         
-        await process.WaitForExitAsync();
+        await process.WaitForExitAsync(cancellationToken);
         
         var stdout = await stdoutTask;
         var stderr = await stderrTask;

@@ -206,7 +206,20 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
             try
             {
                 if (!process.HasExited)
-                    process.Kill(entireProcessTree: true);
+                {
+                    try
+                    {
+                        process.Kill(entireProcessTree: true);
+                    }
+                    catch (PlatformNotSupportedException)
+                    {
+                        process.Kill();
+                    }
+                    catch (InvalidOperationException)
+                    {
+                        // Process already exited
+                    }
+                }
             }
             catch
             {
@@ -293,8 +306,16 @@ public class BuildService(IStockfishDownloader downloader) : IBuildService, IDis
         var safeArch = SanitizeArchitecture(config.SelectedArchitecture?.Id);
         var outputNameRaw = $"stockfish_{safeArch}_{config.SourceVersion}{(RuntimeInformation.IsOSPlatform(OSPlatform.Windows) ? ".exe" : "")}";
         var outputPath = ValidateOutputPath(config.OutputDirectory, outputNameRaw);
-        File.Copy(sourceExe, outputPath, true);
-        _outputSubject.OnNext($"Executable saved to: {outputPath}");
+        try
+        {
+            File.Copy(sourceExe, outputPath, true);
+            _outputSubject.OnNext($"Executable saved to: {outputPath}");
+        }
+        catch (Exception ex)
+        {
+            _outputSubject.OnNext($"Failed to copy executable: {ex.Message}");
+            throw;
+        }
     }
 
     private static string GetCompType(BuildConfiguration config)

@@ -18,6 +18,7 @@ public partial class MainViewModel : ObservableObject
     private readonly IUserSettingsService _userSettingsService;
     private UserSettings _userSettings = new();
     private bool _isRestoringSettings;
+    private bool _isAdjustingParallelJobs;
 
     public MainViewModel(
         ICompilerService compilerService, 
@@ -243,22 +244,20 @@ public partial class MainViewModel : ObservableObject
     partial void OnEnablePgoChanged(bool value) => PersistUserSettings();
     partial void OnParallelJobsChanged(int value)
     {
-        // Clamp parallel jobs to reasonable range
+        if (_isRestoringSettings || _isAdjustingParallelJobs)
+            return;
+
         var maxJobs = Environment.ProcessorCount * 4;
-        if (value < 1)
+        var clampedValue = Math.Clamp(value, 1, maxJobs);
+
+        if (value != clampedValue)
         {
-            ParallelJobs = 1;
-        }
-        else if (value > maxJobs)
-        {
-            ParallelJobs = maxJobs;
-        }
-        
-        if (value < 1 || value > maxJobs)
-        {
+            _isAdjustingParallelJobs = true;
+            ParallelJobs = clampedValue;
+            _isAdjustingParallelJobs = false;
             StatusMessage = $"Warning: Parallel jobs adjusted to valid range (1-{maxJobs})";
         }
-        
+
         PersistUserSettings();
     }
 
