@@ -3,6 +3,7 @@ using System.Runtime.InteropServices;
 using System.IO;
 using System.Threading;
 using Microsoft.Extensions.Logging;
+using StockfishCompiler.Helpers;
 using StockfishCompiler.Models;
 
 namespace StockfishCompiler.Services;
@@ -115,7 +116,10 @@ public class ArchitectureDetector : IArchitectureDetector
         };
 
         // Force C (English) locale to ensure output parsing works on non-English systems
-        var env = SetupEnvironmentForMSYS2(compiler.Path);
+        var env = MSYS2Helper.SetupEnvironment(new BuildConfiguration
+        {
+            SelectedCompiler = new CompilerInfo { Path = compiler.Path }
+        });
         env["LC_ALL"] = "C";
         env["LANG"] = "C";
         foreach (var kvp in env)
@@ -208,7 +212,10 @@ public class ArchitectureDetector : IArchitectureDetector
         };
 
         // Force C (English) locale to ensure output parsing works on non-English systems
-        var env = SetupEnvironmentForMSYS2(compiler.Path);
+        var env = MSYS2Helper.SetupEnvironment(new BuildConfiguration
+        {
+            SelectedCompiler = new CompilerInfo { Path = compiler.Path }
+        });
         env["LC_ALL"] = "C";
         env["LANG"] = "C";
         foreach (var kvp in env)
@@ -268,53 +275,6 @@ public class ArchitectureDetector : IArchitectureDetector
             return GetFallbackFeatures();
         }
         return (distinct, cpuName);
-    }
-
-    private Dictionary<string, string> SetupEnvironmentForMSYS2(string compilerPath)
-    {
-        var env = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (System.Collections.DictionaryEntry entry in Environment.GetEnvironmentVariables())
-        {
-            if (entry.Key is string key && entry.Value is string value)
-                env[key] = value;
-        }
-
-        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-            return env;
-
-        if (string.IsNullOrWhiteSpace(compilerPath))
-            return env;
-
-        var compilerDir = new DirectoryInfo(compilerPath);
-        var msys2Root = compilerDir.Parent?.Parent;
-
-        if (msys2Root != null && msys2Root.Exists)
-        {
-            var pathsToAdd = new List<string> { compilerPath };
-
-            var usrBin = Path.Combine(msys2Root.FullName, "usr", "bin");
-            var mingw64Bin = Path.Combine(msys2Root.FullName, "mingw64", "bin");
-            var mingw32Bin = Path.Combine(msys2Root.FullName, "mingw32", "bin");
-
-            if (Directory.Exists(usrBin))
-                pathsToAdd.Add(usrBin);
-            if (Directory.Exists(mingw64Bin))
-                pathsToAdd.Add(mingw64Bin);
-            if (Directory.Exists(mingw32Bin))
-                pathsToAdd.Add(mingw32Bin);
-
-            var currentPath = env.GetValueOrDefault("PATH", string.Empty);
-            var newPath = string.Join(";", pathsToAdd) + ";" + currentPath;
-            env["PATH"] = newPath;
-            
-            _logger.LogDebug("Set up MSYS2 environment with paths: {Paths}", string.Join("; ", pathsToAdd));
-        }
-        else
-        {
-            _logger.LogDebug("MSYS2 root not found for compiler path: {Path}", compilerPath);
-        }
-
-        return env;
     }
 
     private static string DetermineOptimalArchitecture(List<string> features, string cpuName)

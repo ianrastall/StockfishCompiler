@@ -305,13 +305,13 @@ public partial class MainViewModel : ObservableObject, IDisposable
         if (_isRestoringSettings || _isAdjustingParallelJobs)
             return;
 
-        if (value <= 0)
+        if (value < 1 || value > 1000)
         {
             _isAdjustingParallelJobs = true;
-            ParallelJobs = 1;
+            ParallelJobs = Math.Clamp(value, 1, 32);
             _isAdjustingParallelJobs = false;
-            StatusMessage = "Error: Parallel jobs must be at least 1";
-            _logger.LogWarning("Parallel jobs set to invalid value {Value}, resetting to 1", value);
+            StatusMessage = "Parallel jobs adjusted to valid range (1-32)";
+            _logger.LogWarning("Parallel jobs set to invalid value {Value}, clamping", value);
             return;
         }
 

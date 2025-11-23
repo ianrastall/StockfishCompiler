@@ -403,43 +403,62 @@ if %errorlevel% == 0 (
                       line.Contains("fatal:", StringComparison.OrdinalIgnoreCase) ||
                       line.Contains("warning:", StringComparison.OrdinalIgnoreCase);
 
-        if (builder.Length > MaxOutputCharacters && !isError)
+        var currentLength = builder.Length;
+
+        if (currentLength > MaxOutputCharacters && !isError)
         {
-            var content = builder.ToString();
-            var firstNewLine = content.IndexOf('\n');
-            if (firstNewLine > 0)
+            // Prefer removing up to the next newline to preserve recent context
+            var searchStart = Math.Max(0, currentLength - MaxOutputCharacters);
+            var removeCount = 0;
+
+            for (int i = searchStart; i < currentLength; i++)
             {
-                builder.Remove(0, firstNewLine + 1);
+                if (builder[i] == '\n')
+                {
+                    removeCount = i + 1;
+                    break;
+                }
+            }
+
+            if (removeCount > 0)
+            {
+                builder.Remove(0, removeCount);
+            }
+            else
+            {
+                // No newlines found, aggressively trim from the start to avoid thrashing
+                var excessChars = currentLength - (MaxOutputCharacters / 2);
+                builder.Remove(0, Math.Max(1000, excessChars));
             }
         }
 
         builder.AppendLine(line);
-        
-        // Truncate with a safety counter
-        int truncateAttempts = 0;
-        const int maxTruncateAttempts = 100;
-        
-        while (builder.Length > MaxOutputCharacters && truncateAttempts++ < maxTruncateAttempts)
+
+        if (builder.Length > MaxOutputCharacters)
         {
-            var content = builder.ToString();
-            var idx = content.IndexOf('\n');
-            if (idx < 0)
+            var excess = builder.Length - MaxOutputCharacters;
+            var idx = -1;
+
+            for (int i = Math.Max(0, excess); i < builder.Length; i++)
             {
-                // No more newlines, just truncate from the start
-                var excess = builder.Length - MaxOutputCharacters;
-                builder.Remove(0, Math.Max(1000, excess));
-                break;
+                if (builder[i] == '\n')
+                {
+                    idx = i;
+                    break;
+                }
             }
-            builder.Remove(0, idx + 1);
+
+            if (idx > 0)
+            {
+                builder.Remove(0, idx + 1);
+            }
+            else
+            {
+                // No newline within the safe range, perform a hard truncate
+                builder.Remove(0, excess + 1000);
+            }
         }
-        
-        if (truncateAttempts >= maxTruncateAttempts)
-        {
-            _logger.LogWarning("Output truncation loop exceeded maximum attempts");
-            builder.Clear();
-            builder.AppendLine("[Output buffer cleared due to truncation issues]");
-        }
-        
+
         _outputSubject.OnNext(line);
     }
 
@@ -611,7 +630,7 @@ if %errorlevel% == 0 (
 
     private static string ValidateOutputPath(string outputDirectory, string filename)
     {
-        if (string.IsNullOrWhiteSpace(outputDirectory)) 
+        if (string.IsNullOrWhiteSpace(outputDirectory))
             throw new SecurityException("Output directory not specified");
 
         var safeFilename = Path.GetFileName(filename);
@@ -622,13 +641,11 @@ if %errorlevel% == 0 (
         if (safeFilename.Any(c => invalidChars.Contains(c)))
             throw new SecurityException("Filename contains invalid characters");
 
-        // Additional filename validation
         if (safeFilename.StartsWith('.') || safeFilename.Contains(".."))
             throw new SecurityException("Filename contains suspicious patterns");
 
-        var rootDir = Path.GetFullPath(outputDirectory);
-        
-        // Define allowed root directories
+        var rootDir = NormalizePath(Path.GetFullPath(outputDirectory));
+
         var allowedRoots = new[]
         {
             Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
@@ -639,26 +656,27 @@ if %errorlevel% == 0 (
          .Select(NormalizePath)
          .ToList();
 
-        // Resolve symlinks and junctions to get real path
-        var finalPath = Path.Combine(rootDir, safeFilename);
+        var fullPath = Path.Combine(rootDir, safeFilename);
         string resolvedPath;
-        
+
         try
         {
-            resolvedPath = NormalizePath(Path.GetFullPath(finalPath));
-            
-            // On Windows, resolve junctions and symlinks
-            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            resolvedPath = NormalizePath(Path.GetFullPath(fullPath));
+
+            var directory = Path.GetDirectoryName(resolvedPath);
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && !string.IsNullOrEmpty(directory))
             {
-                resolvedPath = ResolveWindowsPath(resolvedPath);
+                var resolvedDir = ResolveWindowsPath(directory);
+                resolvedPath = Path.Combine(resolvedDir, Path.GetFileName(resolvedPath));
             }
+
+            resolvedPath = NormalizePath(resolvedPath);
         }
         catch (Exception ex)
         {
             throw new SecurityException($"Failed to resolve output path: {ex.Message}");
         }
 
-        // Verify resolved path is under allowed roots
         bool IsUnderRoot(string path, string root)
         {
             var normalizedRoot = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
@@ -672,7 +690,6 @@ if %errorlevel% == 0 (
 
         if (!allowedRoots.Any(r => IsUnderRoot(resolvedPath, r)))
         {
-            // Check if it's a system directory (forbidden)
             var systemDirs = new[]
             {
                 Environment.GetFolderPath(Environment.SpecialFolder.System),
@@ -686,16 +703,14 @@ if %errorlevel% == 0 (
             if (systemDirs.Any(r => IsUnderRoot(resolvedPath, r)))
                 throw new SecurityException("Output directory cannot be a system directory");
 
-            // For non-standard paths, verify we can actually write there
             try
             {
-                var testDir = Path.GetDirectoryName(resolvedPath);
-                if (!string.IsNullOrEmpty(testDir))
+                var targetDir = Path.GetDirectoryName(resolvedPath);
+                if (!string.IsNullOrEmpty(targetDir))
                 {
-                    Directory.CreateDirectory(testDir);
-                    
-                    // Test write permissions
-                    var testFile = Path.Combine(testDir, $".write_test_{Guid.NewGuid():N}");
+                    Directory.CreateDirectory(targetDir);
+
+                    var testFile = Path.Combine(targetDir, $".write_test_{Guid.NewGuid():N}");
                     File.WriteAllText(testFile, "test");
                     File.Delete(testFile);
                 }
@@ -708,16 +723,13 @@ if %errorlevel% == 0 (
             {
                 throw new SecurityException($"Output directory is not accessible: {ex.Message}");
             }
-
-            // Path is accessible but not in allowed roots - this handles user-specified custom directories
         }
         else
         {
-            // Standard allowed path - just ensure directory exists
             Directory.CreateDirectory(Path.GetDirectoryName(resolvedPath) ?? rootDir);
         }
 
-        return finalPath;
+        return resolvedPath;
     }
 
     /// <summary>
@@ -779,23 +791,28 @@ if %errorlevel% == 0 (
         if (_disposed) return;
         _disposed = true;
         
-        // Cancel any ongoing operations FIRST
         _cts?.Cancel();
-        
-        // If a build is still running, cancel and observe completion without blocking UI thread
+
         if (_activeBuildTask is { IsCompleted: false } buildTask)
         {
-            _logger.LogInformation("Cancelling active build during disposal");
-            _ = buildTask.ContinueWith(t =>
+            _logger.LogInformation("Waiting for active build to complete during disposal");
+            try
             {
-                if (t.IsFaulted && t.Exception != null)
+                if (!buildTask.Wait(TimeSpan.FromSeconds(5)))
                 {
-                    _logger.LogWarning(t.Exception, "Build task faulted during disposal");
+                    _logger.LogWarning("Build task did not complete within timeout during disposal");
                 }
-            }, TaskScheduler.Default);
+            }
+            catch (AggregateException ae)
+            {
+                ae.Handle(ex => ex is OperationCanceledException);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error waiting for build task during disposal");
+            }
         }
         
-        // Now safe to complete and dispose observables
         _outputSubject.OnCompleted();
         _progressSubject.OnCompleted();
         _isBuildingSubject.OnCompleted();

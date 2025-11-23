@@ -33,6 +33,28 @@ public class ProcessExecutor
             StartTime = DateTime.UtcNow
         };
 
+        Task streamReads = Task.CompletedTask;
+
+        async Task EnsureStreamReadsAsync()
+        {
+            if (streamReads == Task.CompletedTask || streamReads.IsCompleted)
+                return;
+
+            using var streamCompletionCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+            try
+            {
+                await streamReads.WaitAsync(streamCompletionCts.Token);
+            }
+            catch (OperationCanceledException)
+            {
+                _logger.LogWarning("Stream reading cancelled/timed out after process exit");
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Error completing stream reads");
+            }
+        }
+
         // Create linked cancellation token with timeout
         using var timeoutCts = timeout.HasValue 
             ? new CancellationTokenSource(timeout.Value) 
@@ -127,14 +149,16 @@ public class ProcessExecutor
 
             // Read both streams concurrently
             var readStdOut = ReadStreamAsync(
-                process.StandardOutput, 
-                outputBuilder, 
+                process.StandardOutput,
+                outputBuilder,
                 false);
             
             var readStdErr = ReadStreamAsync(
-                process.StandardError, 
-                errorBuilder, 
+                process.StandardError,
+                errorBuilder,
                 true);
+
+            streamReads = Task.WhenAll(readStdOut, readStdErr);
 
             // Register cancellation handler
             using var registration = linkedCts.Token.Register(() =>
@@ -156,16 +180,7 @@ public class ProcessExecutor
             // Wait for process to exit
             await process.WaitForExitAsync(linkedCts.Token);
 
-            // Wait for streams to finish reading (with short timeout)
-            using var streamCts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-            try
-            {
-                await Task.WhenAll(readStdOut, readStdErr).WaitAsync(streamCts.Token);
-            }
-            catch (OperationCanceledException)
-            {
-                _logger.LogWarning("Stream reading timed out after process exit");
-            }
+            await EnsureStreamReadsAsync();
 
             result.ExitCode = process.ExitCode;
             result.Success = process.ExitCode == 0;
@@ -194,6 +209,7 @@ public class ProcessExecutor
                 result.ProcessId,
                 timeout?.ToString() ?? "unknown");
             
+            await EnsureStreamReadsAsync();
             return result;
         }
         catch (OperationCanceledException)
@@ -205,6 +221,7 @@ public class ProcessExecutor
             
             _logger.LogInformation("Process {ProcessId} cancelled", result.ProcessId);
             
+            await EnsureStreamReadsAsync();
             return result;
         }
         catch (Exception ex)
@@ -216,6 +233,7 @@ public class ProcessExecutor
             
             _logger.LogError(ex, "Error executing process");
             
+            await EnsureStreamReadsAsync();
             return result;
         }
         finally
@@ -237,6 +255,10 @@ public class ProcessExecutor
         
         if (!result.Success)
         {
+            if (result.TimedOut)
+            {
+                _logger.LogWarning("Command timed out: {FileName} {Args}", startInfo.FileName, startInfo.Arguments);
+            }
             return string.Empty;
         }
 

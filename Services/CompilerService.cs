@@ -405,14 +405,15 @@ public class CompilerService(ILogger<CompilerService> logger) : ICompilerService
     {
         var version = await GetCompilerVersionAsync(compilerFullPath);
         var shortVersion = version.Length > 50 ? version.Substring(0, 50) + "..." : version;
+        var directory = Path.GetDirectoryName(compilerFullPath);
         
         return new CompilerInfo
         {
             Name = Path.GetFileName(compilerFullPath),
             Type = type,
             Version = shortVersion,
-            Path = Path.GetDirectoryName(compilerFullPath) ?? string.Empty,
-            DisplayName = $"{type.ToUpper()} - {Path.GetDirectoryName(compilerFullPath)}",
+            Path = directory ?? string.Empty,
+            DisplayName = $"{type.ToUpper()} - {directory ?? "Unknown Path"}",
             IsAvailable = true
         };
     }

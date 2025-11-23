@@ -28,11 +28,13 @@ public static class TextBoxHelper
         {
             textBox.TextChanged -= TextBox_TextChanged;
             textBox.Loaded -= TextBox_Loaded;
+            textBox.Unloaded -= TextBox_Unloaded;
             
             if ((bool)e.NewValue)
             {
                 textBox.TextChanged += TextBox_TextChanged;
                 textBox.Loaded += TextBox_Loaded;
+                textBox.Unloaded += TextBox_Unloaded;
                 ScrollToEnd(textBox);
             }
         }
@@ -43,6 +45,16 @@ public static class TextBoxHelper
         if (sender is TextBox textBox)
         {
             ScrollToEnd(textBox);
+        }
+    }
+
+    private static void TextBox_Unloaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is TextBox textBox)
+        {
+            textBox.TextChanged -= TextBox_TextChanged;
+            textBox.Loaded -= TextBox_Loaded;
+            textBox.Unloaded -= TextBox_Unloaded;
         }
     }
 
