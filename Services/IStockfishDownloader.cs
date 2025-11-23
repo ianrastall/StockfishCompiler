@@ -7,6 +7,7 @@ public interface IStockfishDownloader
     Task<SourceDownloadResult> DownloadSourceAsync(string version, IProgress<string>? progress = null, CancellationToken cancellationToken = default);
     Task<bool> DownloadNeuralNetworkAsync(string sourceDirectory, BuildConfiguration? config = null, IProgress<string>? progress = null, CancellationToken cancellationToken = default);
     Task<ReleaseInfo?> GetLatestReleaseAsync(CancellationToken cancellationToken = default);
+    Task<List<StockfishVersionInfo>> GetAvailableVersionsAsync(CancellationToken cancellationToken = default);
 }
 
 public class ReleaseInfo

@@ -15,6 +15,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
 {
     private readonly ICompilerService _compilerService;
     private readonly IArchitectureDetector _architectureDetector;
+    private readonly IStockfishDownloader _stockfishDownloader;
     private readonly ILogger<MainViewModel> _logger;
     private readonly IUserSettingsService _userSettingsService;
     private UserSettings _userSettings = new();
@@ -26,12 +27,14 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
     public MainViewModel(
         ICompilerService compilerService, 
-        IArchitectureDetector architectureDetector, 
+        IArchitectureDetector architectureDetector,
+        IStockfishDownloader stockfishDownloader,
         ILogger<MainViewModel> logger,
         IUserSettingsService userSettingsService)
     {
         _compilerService = compilerService;
         _architectureDetector = architectureDetector;
+        _stockfishDownloader = stockfishDownloader;
         _logger = logger;
         _userSettingsService = userSettingsService;
 
@@ -42,6 +45,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
         LoadUserSettings();
         _ = LoadAvailableArchitectures();
+        _ = LoadAvailableVersionsAsync();
         
         _logger.LogInformation("MainViewModel initialized");
     }
@@ -88,6 +92,12 @@ public partial class MainViewModel : ObservableObject, IDisposable
 
     [ObservableProperty]
     private string detectionDetails = string.Empty;
+
+    [ObservableProperty]
+    private ObservableCollection<StockfishVersionInfo> availableVersions = [];
+
+    [ObservableProperty]
+    private StockfishVersionInfo? selectedVersionInfo;
 
     public IAsyncRelayCommand DetectCompilersCommand { get; }
     public IAsyncRelayCommand DetectArchitectureCommand { get; }
@@ -198,6 +208,32 @@ public partial class MainViewModel : ObservableObject, IDisposable
         }
     }
 
+    private async Task LoadAvailableVersionsAsync()
+    {
+        try
+        {
+            _logger.LogInformation("Loading available Stockfish versions");
+            var versions = await _stockfishDownloader.GetAvailableVersionsAsync();
+            AvailableVersions = new ObservableCollection<StockfishVersionInfo>(versions);
+            
+            // Restore the saved version if available
+            StockfishVersionInfo? selectedVersion = null;
+            if (!string.IsNullOrWhiteSpace(SourceVersion))
+            {
+                selectedVersion = AvailableVersions.FirstOrDefault(v => v.Id == SourceVersion);
+            }
+            
+            // Fall back to "stable" if saved version not found
+            SelectedVersionInfo = selectedVersion ?? AvailableVersions.FirstOrDefault(v => v.Id == "stable");
+            
+            _logger.LogInformation("Loaded {Count} Stockfish versions", versions.Count);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Error loading Stockfish versions");
+        }
+    }
+
     private void LoadUserSettings()
     {
         try
@@ -301,6 +337,62 @@ public partial class MainViewModel : ObservableObject, IDisposable
         }
         
         PersistUserSettings();
+    }
+
+    partial void OnSelectedVersionInfoChanged(StockfishVersionInfo? value)
+    {
+        if (value != null && !_isRestoringSettings)
+        {
+            SourceVersion = value.Id;
+            
+            // Provide context-aware status messages
+            if (!value.IsCompatible)
+            {
+                StatusMessage = $"?? Warning: {value.DisplayName} is likely incompatible with this build tool";
+            }
+            else if (!string.IsNullOrWhiteSpace(value.CompatibilityNotes))
+            {
+                StatusMessage = $"Note: {value.DisplayName} selected - see compatibility information below";
+            }
+            else if (value.IsRecommended)
+            {
+                StatusMessage = $"? {value.DisplayName} selected (recommended)";
+            }
+            else
+            {
+                StatusMessage = $"{value.DisplayName} selected";
+            }
+            
+            // Auto-adjust settings based on version requirements
+            if (value.NnueRequirement == NeuralNetworkRequirement.None)
+            {
+                // Classical versions don't need network downloads
+                if (DownloadNetwork)
+                {
+                    _logger.LogInformation("Disabling network download for classical version {Version}", value.DisplayName);
+                    DownloadNetwork = false;
+                }
+            }
+            else if (value.NnueRequirement == NeuralNetworkRequirement.Required)
+            {
+                // Neural versions absolutely require the network
+                if (!DownloadNetwork)
+                {
+                    _logger.LogInformation("Enabling network download for neural version {Version}", value.DisplayName);
+                    DownloadNetwork = true;
+                }
+            }
+            
+            // Log version selection for debugging
+            _logger.LogInformation(
+                "Version selected: {Version} (Major: {Major}, C++: {CppStd}, NNUE: {Nnue}, Classical: {Classical})",
+                value.DisplayName,
+                value.MajorVersion,
+                value.MinimumCppStandard,
+                value.NnueRequirement,
+                value.HasClassicalEval
+            );
+        }
     }
 
     private bool ValidateOutputDirectory(string path)

@@ -15,7 +15,9 @@ public class StockfishDownloader : IStockfishDownloader
 {
     private readonly HttpClient _httpClient;
     private const string GitHubApiUrl = "https://api.github.com/repos/official-stockfish/Stockfish/releases/latest";
+    private const string GitHubReleasesApiUrl = "https://api.github.com/repos/official-stockfish/Stockfish/releases";
     private const string MasterZipUrl = "https://github.com/official-stockfish/Stockfish/archive/refs/heads/master.zip";
+    private static readonly string CacheRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "StockfishCompiler", "cache", "sources");
     private static readonly string[] NetworkMirrors =
     [
         "https://tests.stockfishchess.org/api/nn/{0}",
@@ -39,6 +41,190 @@ public class StockfishDownloader : IStockfishDownloader
         {
             _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("StockfishCompiler/1.0");
         }
+    }
+
+    public async Task<List<StockfishVersionInfo>> GetAvailableVersionsAsync(CancellationToken cancellationToken = default)
+    {
+        var versions = new List<StockfishVersionInfo>
+        {
+            new()
+            {
+                Id = "master",
+                DisplayName = "Development (master branch)",
+                Tag = "master",
+                Description = "Latest development code - may be unstable",
+                IsRecommended = false,
+                IsCompatible = true,
+                MinimumCppStandard = "C++20",
+                NnueRequirement = NeuralNetworkRequirement.Required,
+                HasClassicalEval = false,
+                MajorVersion = 99, // Use high number for sorting
+                CompatibilityNotes = "Requires modern compiler (GCC 10+ or Clang 11+)"
+            },
+            new()
+            {
+                Id = "stable",
+                DisplayName = "Latest Stable Release",
+                Tag = "latest",
+                Description = "Most recent official release (recommended)",
+                IsRecommended = true,
+                IsCompatible = true,
+                MinimumCppStandard = "C++17",
+                NnueRequirement = NeuralNetworkRequirement.Required,
+                HasClassicalEval = false,
+                MajorVersion = 98, // Use high number for sorting
+                CompatibilityNotes = null
+            }
+        };
+
+        try
+        {
+            using var response = await _httpClient.GetAsync(GitHubReleasesApiUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
+            response.EnsureSuccessStatusCode();
+            using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
+            using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
+
+            if (doc.RootElement.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var release in doc.RootElement.EnumerateArray())
+                {
+                    if (!release.TryGetProperty("tag_name", out var tagNameProp))
+                        continue;
+
+                    var tagName = tagNameProp.GetString();
+                    if (string.IsNullOrWhiteSpace(tagName))
+                        continue;
+
+                    // Parse version from tag (e.g., "sf_17", "sf_17.1", "sf_18")
+                    var versionMatch = Regex.Match(tagName, @"sf_(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase);
+                    if (!versionMatch.Success)
+                        continue;
+
+                    var versionNumber = versionMatch.Groups[1].Value;
+                    var releaseName = release.TryGetProperty("name", out var nameProp) ? nameProp.GetString() : null;
+                    var publishedAt = release.TryGetProperty("published_at", out var publishedProp) ? publishedProp.GetString() : null;
+
+                    // Parse major version for classification
+                    var majorVersionStr = versionNumber.Split('.')[0];
+                    if (!int.TryParse(majorVersionStr, out var majorVersion))
+                        continue;
+
+                    // Classify version based on research findings
+                    var versionInfo = ClassifyStockfishVersion(majorVersion, versionNumber, tagName, releaseName, publishedAt);
+                    versions.Add(versionInfo);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // Log but don't fail - we already have master and stable
+            System.Diagnostics.Debug.WriteLine($"Failed to fetch GitHub releases: {ex.Message}");
+        }
+
+        // Keep only versions we consider buildable (NNUE era and newer), plus master/stable aliases.
+        versions = versions
+            .Where(v => v.MajorVersion >= 12 || string.Equals(v.Id, "master", StringComparison.OrdinalIgnoreCase) || string.Equals(v.Id, "stable", StringComparison.OrdinalIgnoreCase))
+            .OrderByDescending(v => v.MajorVersion)
+            .ThenByDescending(v => v.Id)
+            .ToList();
+
+        return versions;
+    }
+
+    private static StockfishVersionInfo ClassifyStockfishVersion(
+        int majorVersion, 
+        string versionNumber, 
+        string tagName, 
+        string? releaseName, 
+        string? publishedAt)
+    {
+        var displayName = !string.IsNullOrWhiteSpace(releaseName) 
+            ? releaseName 
+            : $"Stockfish {versionNumber}";
+
+        var publishedInfo = !string.IsNullOrWhiteSpace(publishedAt) 
+            ? $"Released {(DateTime.TryParse(publishedAt, out var date) ? date.ToString("MMMM yyyy") : publishedAt)}" 
+            : "Release date unknown";
+
+        // Classify based on version number according to research
+        StockfishVersionInfo versionInfo;
+
+        if (majorVersion >= 16)
+        {
+            // SF 16+: Pure neural, requires C++17/C++20, no classical eval
+            versionInfo = new StockfishVersionInfo
+            {
+                Id = tagName,
+                DisplayName = displayName,
+                Tag = tagName,
+                Description = $"{publishedInfo} - Pure neural evaluation",
+                IsRecommended = false,
+                IsCompatible = true,
+                MinimumCppStandard = "C++17",
+                NnueRequirement = NeuralNetworkRequirement.Required,
+                HasClassicalEval = false,
+                MajorVersion = majorVersion,
+                CompatibilityNotes = majorVersion >= 17 
+                    ? null 
+                    : "Requires network file. May need compiler updates (GCC 10+ or Clang 11+)"
+            };
+        }
+        else if (majorVersion >= 12 && majorVersion <= 15)
+        {
+            // SF 12-15: Hybrid era, NNUE + classical
+            versionInfo = new StockfishVersionInfo
+            {
+                Id = tagName,
+                DisplayName = displayName,
+                Tag = tagName,
+                Description = $"{publishedInfo} - Hybrid evaluation (NNUE + classical)",
+                IsRecommended = false,
+                IsCompatible = true,
+                MinimumCppStandard = "C++11",
+                NnueRequirement = NeuralNetworkRequirement.Optional,
+                HasClassicalEval = true,
+                MajorVersion = majorVersion,
+                CompatibilityNotes = "Can compile without NNUE but performance will be significantly lower"
+            };
+        }
+        else if (majorVersion >= 10 && majorVersion < 12)
+        {
+            // SF 10-11: Classical era, potentially compatible
+            versionInfo = new StockfishVersionInfo
+            {
+                Id = tagName,
+                DisplayName = displayName,
+                Tag = tagName,
+                Description = $"{publishedInfo} - Classical evaluation only",
+                IsRecommended = false,
+                IsCompatible = true,
+                MinimumCppStandard = "C++11",
+                NnueRequirement = NeuralNetworkRequirement.None,
+                HasClassicalEval = true,
+                MajorVersion = majorVersion,
+                CompatibilityNotes = "? Build scripts from SF 17.1 may need adjustments for this version"
+            };
+        }
+        else
+        {
+            // SF 9 and below: Likely incompatible build system
+            versionInfo = new StockfishVersionInfo
+            {
+                Id = tagName,
+                DisplayName = displayName,
+                Tag = tagName,
+                Description = $"{publishedInfo} - Legacy version",
+                IsRecommended = false,
+                IsCompatible = false,
+                MinimumCppStandard = "C++11",
+                NnueRequirement = NeuralNetworkRequirement.None,
+                HasClassicalEval = true,
+                MajorVersion = majorVersion,
+                CompatibilityNotes = "?? This version uses significantly different build scripts and is unlikely to compile correctly with this tool"
+            };
+        }
+
+        return versionInfo;
     }
 
     public async Task<ReleaseInfo?> GetLatestReleaseAsync(CancellationToken cancellationToken = default)
@@ -71,9 +257,45 @@ public class StockfishDownloader : IStockfishDownloader
         Directory.CreateDirectory(tempDir);
 
         var zipPath = Path.Combine(tempDir, "stockfish.zip");
-        var url = version == "master" ? MasterZipUrl : (await GetLatestReleaseAsync(cancellationToken))?.Url ?? MasterZipUrl;
+        var cachePath = Path.Combine(CacheRoot, $"{version}.zip");
+        
+        // Determine download URL based on version
+        string url;
+        if (version == "master")
+        {
+            url = MasterZipUrl;
+        }
+        else if (version == "stable" || version == "latest")
+        {
+            var release = await GetLatestReleaseAsync(cancellationToken);
+            url = release?.Url ?? MasterZipUrl;
+        }
+        else
+        {
+            // Specific version tag (e.g., "sf_17", "sf_17.1")
+            url = $"https://github.com/official-stockfish/Stockfish/archive/refs/tags/{version}.zip";
+        }
 
-        await SafeDownloadToFileAsync(url, zipPath, progress, cancellationToken);
+        // Prefer cached source if present; otherwise download and store in cache for offline reuse.
+        if (File.Exists(cachePath) && new FileInfo(cachePath).Length > 0)
+        {
+            progress?.Report("Using cached source archive.");
+            File.Copy(cachePath, zipPath, overwrite: true);
+        }
+        else
+        {
+            await SafeDownloadToFileAsync(url, zipPath, progress, cancellationToken);
+            try
+            {
+                Directory.CreateDirectory(CacheRoot);
+                File.Copy(zipPath, cachePath, overwrite: true);
+                progress?.Report($"Cached source at: {cachePath}");
+            }
+            catch
+            {
+                // Cache write is best-effort; ignore failures.
+            }
+        }
 
         var downloadResult = new SourceDownloadResult
         {

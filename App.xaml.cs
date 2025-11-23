@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using System.Windows;
 using StockfishCompiler.Services;
 using StockfishCompiler.ViewModels;
+using StockfishCompiler.Views;
 
 namespace StockfishCompiler
 {
@@ -100,7 +101,7 @@ namespace StockfishCompiler
             catch (Exception ex)
             {
                 Log.Fatal(ex, "Application failed to start");
-                MessageBox.Show(
+                DarkMessageBox.Show(
                     $"Application failed to start:\n\n{ex.Message}\n\nLog file: {logPath}",
                     "Startup Error",
                     MessageBoxButton.OK,
@@ -122,7 +123,7 @@ namespace StockfishCompiler
         private void Application_DispatcherUnhandledException(object sender, System.Windows.Threading.DispatcherUnhandledExceptionEventArgs e)
         {
             Log.Error(e.Exception, "Unhandled exception occurred");
-            MessageBox.Show(
+            DarkMessageBox.Show(
                 $"An unexpected error occurred:\n\n{e.Exception.Message}\n\nCheck logs for details.",
                 "Error",
                 MessageBoxButton.OK,

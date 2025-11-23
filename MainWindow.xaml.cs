@@ -4,6 +4,7 @@ using System.IO;
 using System.Windows;
 using Microsoft.Extensions.DependencyInjection;
 using StockfishCompiler.ViewModels;
+using StockfishCompiler.Views;
 
 namespace StockfishCompiler
 {
@@ -31,11 +32,12 @@ namespace StockfishCompiler
             }
             else
             {
-                MessageBox.Show(
+                DarkMessageBox.Show(
                     "No logs directory found yet. Logs will be created when the application runs.",
                     "Logs",
                     MessageBoxButton.OK,
-                    MessageBoxImage.Information
+                    MessageBoxImage.Information,
+                    this
                 );
             }
         }
@@ -46,11 +48,12 @@ namespace StockfishCompiler
             {
                 if (App.Services == null)
                 {
-                    MessageBox.Show(
+                    DarkMessageBox.Show(
                         "Application services not available.",
                         "Error",
                         MessageBoxButton.OK,
-                        MessageBoxImage.Error
+                        MessageBoxImage.Error,
+                        this
                     );
                     return;
                 }
@@ -61,30 +64,33 @@ namespace StockfishCompiler
                 if (!string.IsNullOrWhiteSpace(output))
                 {
                     Clipboard.SetText(output);
-                    MessageBox.Show(
+                    DarkMessageBox.Show(
                         "Build output copied to clipboard.",
                         "Copy Output",
                         MessageBoxButton.OK,
-                        MessageBoxImage.Information
+                        MessageBoxImage.Information,
+                        this
                     );
                 }
                 else
                 {
-                    MessageBox.Show(
+                    DarkMessageBox.Show(
                         "No build output available yet. Start a build first.",
                         "Copy Output",
                         MessageBoxButton.OK,
-                        MessageBoxImage.Information
+                        MessageBoxImage.Information,
+                        this
                     );
                 }
             }
             catch (Exception ex)
             {
-                MessageBox.Show(
+                DarkMessageBox.Show(
                     $"Failed to copy output:\n{ex.Message}",
                     "Copy Output",
                     MessageBoxButton.OK,
-                    MessageBoxImage.Error
+                    MessageBoxImage.Error,
+                    this
                 );
             }
         }

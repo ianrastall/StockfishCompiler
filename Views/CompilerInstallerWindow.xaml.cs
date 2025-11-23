@@ -49,33 +49,36 @@ public partial class CompilerInstallerWindow : Window
                 CompilerInstalled = true;
                 InstalledPath = installPath;
                 
-                MessageBox.Show(
+                DarkMessageBox.Show(
                     "Compiler installed successfully!\n\n" +
                     $"Location: {installPath}\n\n" +
                     "Click OK to continue with compiler detection.",
                     "Installation Complete",
                     MessageBoxButton.OK,
-                    MessageBoxImage.Information);
+                    MessageBoxImage.Information,
+                    this);
                 
                 DialogResult = true;
             }
             else
             {
-                MessageBox.Show(
+                DarkMessageBox.Show(
                     "Compiler installation failed.\n\n" +
                     "Please check the log for details or install MSYS2 manually.",
                     "Installation Failed",
                     MessageBoxButton.OK,
-                    MessageBoxImage.Error);
+                    MessageBoxImage.Error,
+                    this);
             }
         }
         catch (Exception ex)
         {
-            MessageBox.Show(
+            DarkMessageBox.Show(
                 $"An error occurred during installation:\n\n{ex.Message}",
                 "Installation Error",
                 MessageBoxButton.OK,
-                MessageBoxImage.Error);
+                MessageBoxImage.Error,
+                this);
         }
         finally
         {
@@ -91,11 +94,12 @@ public partial class CompilerInstallerWindow : Window
     {
         if (_isInstalling)
         {
-            var result = MessageBox.Show(
+            var result = DarkMessageBox.Show(
                 "Installation is in progress. Are you sure you want to cancel?",
                 "Cancel Installation",
                 MessageBoxButton.YesNo,
-                MessageBoxImage.Warning);
+                MessageBoxImage.Warning,
+                this);
             
             if (result != MessageBoxResult.Yes) return;
 
