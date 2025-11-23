@@ -14,7 +14,6 @@ namespace StockfishCompiler.ViewModels;
 public partial class BuildViewModel : ObservableObject, IDisposable
 {
     private readonly IBuildService _buildService;
-    private readonly MainViewModel _mainViewModel;
     private readonly ILogger<BuildViewModel> _logger;
     private readonly List<IDisposable> _subscriptions = new();
     private readonly Queue<string> _logQueue = new();
@@ -25,15 +24,14 @@ public partial class BuildViewModel : ObservableObject, IDisposable
 
     private const int MaxOutputLines = 1000;
 
-    public BuildViewModel(IBuildService buildService, MainViewModel mainViewModel, ILogger<BuildViewModel> logger)
+    public BuildViewModel(IBuildService buildService, ILogger<BuildViewModel> logger)
     {
         _buildService = buildService;
-        _mainViewModel = mainViewModel;
         _logger = logger;
 
         _logger.LogInformation("BuildViewModel initializing");
 
-        StartBuildCommand = new AsyncRelayCommand(StartBuildAsync, () => !IsBuilding);
+        StartBuildCommand = new AsyncRelayCommand<BuildConfiguration>(StartBuildAsync, _ => !IsBuilding);
         CancelBuildCommand = new AsyncRelayCommand(CancelBuildAsync, () => IsBuilding);
 
         // Setup UI update timer to throttle output updates (4 times per second max)
@@ -94,7 +92,7 @@ public partial class BuildViewModel : ObservableObject, IDisposable
     [ObservableProperty]
     private bool isBuilding = false;
 
-    public IAsyncRelayCommand StartBuildCommand { get; }
+    public IAsyncRelayCommand<BuildConfiguration> StartBuildCommand { get; }
     public IAsyncRelayCommand CancelBuildCommand { get; }
 
     private void AppendOutput(string line)
@@ -110,7 +108,7 @@ public partial class BuildViewModel : ObservableObject, IDisposable
         Interlocked.Exchange(ref _isDirty, 1);
     }
 
-    private async Task StartBuildAsync()
+    private async Task StartBuildAsync(BuildConfiguration? config)
     {
         // Clear output queue and display
         lock (_logLock)
@@ -120,19 +118,14 @@ public partial class BuildViewModel : ObservableObject, IDisposable
         BuildOutput = string.Empty;
         BuildProgress = 0;
 
-        _logger.LogInformation("Starting build process");
-
-        var config = new BuildConfiguration
+        if (config is null)
         {
-            SelectedCompiler = _mainViewModel.SelectedCompiler,
-            SelectedArchitecture = _mainViewModel.SelectedArchitecture,
-            SourceVersion = _mainViewModel.SourceVersion,
-            DownloadNetwork = _mainViewModel.DownloadNetwork,
-            StripExecutable = _mainViewModel.StripExecutable,
-            EnablePgo = _mainViewModel.EnablePgo,
-            ParallelJobs = _mainViewModel.ParallelJobs,
-            OutputDirectory = _mainViewModel.OutputDirectory
-        };
+            _logger.LogWarning("Build aborted - no configuration provided");
+            BuildOutput = "Error: No build configuration provided.\n";
+            return;
+        }
+
+        _logger.LogInformation("Starting build process");
 
         if (config.SelectedCompiler == null)
         {

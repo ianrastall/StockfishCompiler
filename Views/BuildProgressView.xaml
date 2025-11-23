@@ -24,7 +24,7 @@
                  helpers:TextBoxHelper.AlwaysScrollToEnd="True"/>
 
         <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right">
-            <Button Content="Start Build" Command="{Binding StartBuildCommand}" Style="{StaticResource DarkButton}"/>
+            <Button Content="Start Build" Click="StartBuildButton_Click" Style="{StaticResource DarkButton}"/>
             <Button Content="Cancel" Command="{Binding CancelBuildCommand}" Style="{StaticResource DarkButton}"/>
         </StackPanel>
     </Grid>

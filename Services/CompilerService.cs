@@ -92,77 +92,63 @@ public class CompilerService(ILogger<CompilerService> logger) : ICompilerService
 
     private async Task<List<CompilerInfo>> DetectMSYS2CompilersAsync()
     {
-        logger.LogInformation("Searching for MSYS2 installations");
+        logger.LogInformation("Searching for MSYS2 installations (focused scan)");
         
-        // Wrap drive scanning in Task.Run to avoid UI freeze on network/sleeping drives
         var possiblePaths = await Task.Run(() =>
         {
             var paths = new List<string>();
-            
             try
             {
-                // Search common locations across all drives
-                var drives = DriveInfo.GetDrives()
-                    .Where(d => d.DriveType == DriveType.Fixed && d.IsReady)
-                    .Select(d => d.Name.TrimEnd('\\'))
-                    .ToList();
-
-                logger.LogInformation("Searching drives: {Drives}", string.Join(", ", drives));
-
-                foreach (var drive in drives)
-                {
-                    // Add root level msys2/msys64 paths
-                    paths.Add(Path.Combine(drive, "msys64"));
-                    paths.Add(Path.Combine(drive, "msys2"));
-                    
-                    // Check Program Files
-                    paths.Add(Path.Combine(drive, "Program Files", "msys64"));
-                    paths.Add(Path.Combine(drive, "Program Files", "msys2"));
-                    
-                    // Check tools directories
-                    paths.Add(Path.Combine(drive, "tools", "msys64"));
-                    paths.Add(Path.Combine(drive, "tools", "msys2"));
-                }
-
-                // Add user profile paths
-                paths.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "msys64"));
-                paths.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "msys2"));
-                paths.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "msys64"));
-                paths.Add(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "msys2"));
-
-                // Check environment variable
+                // Priority 1: Environment Variable override
                 var msysEnvVar = Environment.GetEnvironmentVariable("MSYS2_PATH");
                 if (!string.IsNullOrEmpty(msysEnvVar))
                 {
                     paths.Add(msysEnvVar);
                 }
+
+                // Priority 2: System drive defaults
+                var systemDriveRoot = Path.GetPathRoot(Environment.SystemDirectory) ?? "C:\\";
+                paths.Add(Path.Combine(systemDriveRoot, "msys64"));
+                paths.Add(Path.Combine(systemDriveRoot, "msys2"));
+                paths.Add(Path.Combine(systemDriveRoot, "Program Files", "msys64"));
+                paths.Add(Path.Combine(systemDriveRoot, "Program Files", "msys2"));
+                paths.Add(Path.Combine(systemDriveRoot, "tools", "msys64"));
+                paths.Add(Path.Combine(systemDriveRoot, "tools", "msys2"));
+
+                // Priority 3: User profile
+                var userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                if (!string.IsNullOrWhiteSpace(userProfile))
+                {
+                    paths.Add(Path.Combine(userProfile, "msys64"));
+                    paths.Add(Path.Combine(userProfile, "msys2"));
+                }
+
+                // Priority 4: LocalAppData
+                var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+                if (!string.IsNullOrWhiteSpace(localAppData))
+                {
+                    paths.Add(Path.Combine(localAppData, "msys64"));
+                    paths.Add(Path.Combine(localAppData, "msys2"));
+                }
             }
             catch (Exception ex)
             {
-                logger.LogWarning(ex, "Error scanning drives for MSYS2");
+                logger.LogWarning(ex, "Error while assembling MSYS2 search paths");
             }
-            
-            // Remove duplicates and check which paths exist
+
             return paths.Distinct(StringComparer.OrdinalIgnoreCase)
-                       .Where(p =>
-                       {
-                           try
-                           {
-                               return Directory.Exists(p);
-                           }
-                           catch
-                           {
-                               return false;
-                           }
-                       })
-                       .ToList();
+                        .Where(p =>
+                        {
+                            try { return Directory.Exists(p); } catch { return false; }
+                        })
+                        .ToList();
         });
 
         List<CompilerInfo> compilers = [];
         
         foreach (var basePath in possiblePaths)
         {
-            logger.LogInformation("Found MSYS2 at: {Path}", basePath);
+            logger.LogInformation("Found MSYS2 candidate: {Path}", basePath);
             
             var msysPaths = new[]
             {
@@ -208,8 +194,8 @@ public class CompilerService(ILogger<CompilerService> logger) : ICompilerService
 
         var gitPaths = new[]
         {
-            @"C:\Program Files\Git\mingw64\bin",
-            @"C:\Program Files (x86)\Git\mingw64\bin",
+            @"C:\\Program Files\\Git\\mingw64\\bin",
+            @"C:\\Program Files (x86)\\Git\\mingw64\\bin",
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Git", "mingw64", "bin")
         };
 
@@ -246,10 +232,10 @@ public class CompilerService(ILogger<CompilerService> logger) : ICompilerService
                 // Check for Clang/LLVM
                 var clangPaths = new[]
                 {
-                    $@"C:\Program Files\Microsoft Visual Studio\{year}\{edition}\VC\Tools\Llvm\x64\bin",
-                    $@"C:\Program Files\Microsoft Visual Studio\{year}\{edition}\VC\Tools\Llvm\bin",
-                    $@"C:\Program Files (x86)\Microsoft Visual Studio\{year}\{edition}\VC\Tools\Llvm\x64\bin",
-                    $@"C:\Program Files (x86)\Microsoft Visual Studio\{year}\{edition}\VC\Tools\Llvm\bin"
+                    $@"C:\\Program Files\\Microsoft Visual Studio\\{year}\\{edition}\\VC\\Tools\\Llvm\\x64\\bin",
+                    $@"C:\\Program Files\\Microsoft Visual Studio\\{year}\\{edition}\\VC\\Tools\\Llvm\\bin",
+                    $@"C:\\Program Files (x86)\\Microsoft Visual Studio\\{year}\\{edition}\\VC\\Tools\\Llvm\\x64\\bin",
+                    $@"C:\\Program Files (x86)\\Microsoft Visual Studio\\{year}\\{edition}\\VC\\Tools\\Llvm\\bin"
                 };
 
                 foreach (var path in clangPaths.Where(Directory.Exists))
@@ -269,8 +255,8 @@ public class CompilerService(ILogger<CompilerService> logger) : ICompilerService
                 // Check for MSVC (cl.exe)
                 var msvcPaths = new[]
                 {
-                    $@"C:\Program Files\Microsoft Visual Studio\{year}\{edition}\VC\Tools\MSVC",
-                    $@"C:\Program Files (x86)\Microsoft Visual Studio\{year}\{edition}\VC\Tools\MSVC"
+                    $@"C:\\Program Files\\Microsoft Visual Studio\\{year}\\{edition}\\VC\\Tools\\MSVC",
+                    $@"C:\\Program Files (x86)\\Microsoft Visual Studio\\{year}\\{edition}\\VC\\Tools\\MSVC"
                 };
 
                 foreach (var basePath in msvcPaths.Where(Directory.Exists))
@@ -348,29 +334,18 @@ public class CompilerService(ILogger<CompilerService> logger) : ICompilerService
 
         var mingwPaths = new List<string>
         {
-            @"C:\MinGW\bin",
-            @"C:\MinGW-w64\bin",
-            @"C:\mingw64\bin",
-            @"D:\MinGW\bin",
-            @"D:\mingw64\bin",
+            @"C:\\MinGW\\bin",
+            @"C:\\MinGW-w64\\bin",
+            @"C:\\mingw64\\bin",
+            @"D:\\MinGW\\bin",
+            @"D:\\mingw64\\bin",
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "MinGW", "bin"),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "MinGW", "bin"),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles), "mingw64", "bin"),
             Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86), "mingw64", "bin")
         };
 
-        // Check all drives for common MinGW locations
-        var drives = DriveInfo.GetDrives()
-            .Where(d => d.DriveType == DriveType.Fixed && d.IsReady)
-            .Select(d => d.Name.TrimEnd('\\'));
-
-        foreach (var drive in drives)
-        {
-            mingwPaths.Add(Path.Combine(drive, "MinGW", "bin"));
-            mingwPaths.Add(Path.Combine(drive, "mingw64", "bin"));
-            mingwPaths.Add(Path.Combine(drive, "MinGW-w64", "bin"));
-        }
-
+        // Keep D: quick probes; avoid scanning all drives exhaustively
         foreach (var path in mingwPaths.Distinct().Where(Directory.Exists))
         {
             logger.LogInformation("Found MinGW at: {Path}", path);

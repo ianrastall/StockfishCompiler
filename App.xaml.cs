@@ -7,6 +7,7 @@ using System.Net.Http;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
+using StockfishCompiler.Helpers;
 using StockfishCompiler.Services;
 using StockfishCompiler.ViewModels;
 using StockfishCompiler.Views;
@@ -60,12 +61,16 @@ namespace StockfishCompiler
                     client.DefaultRequestHeaders.UserAgent.ParseAdd("StockfishCompiler/1.0");
                 });
 
+                // Helpers
+                services.AddSingleton<ProcessExecutor>();
+
                 // Services
                 services.AddSingleton<ICompilerService, CompilerService>();
                 services.AddSingleton<ICompilerInstallerService, CompilerInstallerService>();
                 services.AddSingleton<IArchitectureDetector, ArchitectureDetector>();
                 services.AddSingleton<IBuildService, BuildService>(); // Singleton to match BuildViewModel lifetime
                 services.AddSingleton<IUserSettingsService, UserSettingsService>();
+                services.AddSingleton<NetworkValidationManager>();
 
                 // ViewModels
                 services.AddSingleton<MainViewModel>();
@@ -115,9 +120,130 @@ namespace StockfishCompiler
         protected override void OnExit(ExitEventArgs e)
         {
             Log.Information("Application exiting with code {ExitCode}", e.ApplicationExitCode);
+            
+            try
+            {
+                // Dispose services in reverse dependency order
+                DisposeServicesGracefully();
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Error during service disposal");
+            }
+            
             Services?.Dispose();
             Log.CloseAndFlush();
             base.OnExit(e);
+        }
+
+        private void DisposeServicesGracefully()
+        {
+            if (Services == null) return;
+
+            // Track disposal for logging
+            var disposalTimer = Stopwatch.StartNew();
+            var disposedCount = 0;
+
+            try
+            {
+                // 1. Cancel any active builds first
+                var buildService = Services.GetService<IBuildService>();
+                if (buildService != null)
+                {
+                    Log.Information("Cancelling active builds (fire-and-forget)...");
+                    try
+                    {
+                        // Trigger cancellation without blocking UI thread
+                        _ = buildService.CancelBuildAsync();
+                    }
+                    catch (Exception ex)
+                    {
+                        Log.Warning(ex, "Error triggering build cancellation during shutdown");
+                    }
+
+                    // Now dispose the build service
+                    if (buildService is IDisposable disposableBuildService)
+                    {
+                        try
+                        {
+                            disposableBuildService.Dispose();
+                            disposedCount++;
+                            Log.Debug("Disposed BuildService");
+                        }
+                        catch (Exception ex)
+                        {
+                            Log.Warning(ex, "Error disposing BuildService");
+                        }
+                    }
+                }
+
+                // 2. Dispose ViewModels (they may hold references to services)
+                var viewModelsToDispose = new object?[]
+                {
+                    Services.GetService<BuildViewModel>(),
+                    Services.GetService<MainViewModel>()
+                };
+
+                foreach (var vm in viewModelsToDispose)
+                {
+                    if (vm is IDisposable disposableVm)
+                    {
+                        try
+                        {
+                            // Give each ViewModel 500ms to dispose
+                            var disposeTask = Task.Run(() => disposableVm.Dispose());
+                            if (!disposeTask.Wait(TimeSpan.FromMilliseconds(500)))
+                            {
+                                Log.Warning("ViewModel disposal timed out: {Type}", vm.GetType().Name);
+                            }
+                            else
+                            {
+                                disposedCount++;
+                                Log.Debug("Disposed {Type}", vm.GetType().Name);
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Log.Warning(ex, "Error disposing {Type}", vm.GetType().Name);
+                        }
+                    }
+                }
+
+                // 3. Dispose remaining services
+                var remainingDisposableServices = new object?[]
+                {
+                    Services.GetService<IUserSettingsService>(),
+                    Services.GetService<ICompilerInstallerService>(),
+                    Services.GetService<NetworkValidationManager>()
+                };
+
+                foreach (var service in remainingDisposableServices)
+                {
+                    if (service is IDisposable disposableService)
+                    {
+                        try
+                        {
+                            disposableService.Dispose();
+                            disposedCount++;
+                            Log.Debug("Disposed {Type}", service.GetType().Name);
+                        }
+                        catch (Exception ex)
+                        {
+                            Log.Warning(ex, "Error disposing {Type}", service.GetType().Name);
+                        }
+                    }
+                }
+
+                disposalTimer.Stop();
+                Log.Information(
+                    "Graceful disposal complete: {Count} services disposed in {Duration}ms",
+                    disposedCount,
+                    disposalTimer.ElapsedMilliseconds);
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Fatal error during graceful disposal");
+            }
         }
 
         private void Application_DispatcherUnhandledException(object sender, System.Windows.Threading.DispatcherUnhandledExceptionEventArgs e)

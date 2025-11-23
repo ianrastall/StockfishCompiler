@@ -78,23 +78,6 @@ public class BuildService(IStockfishDownloader downloader, ILogger<BuildService>
                 _progressSubject.OnNext(networkReady ? 40 : 30);
             }
 
-            ExecuteFileOperation(() =>
-            {
-                if (CreatePlaceholderNetwork(sourceDir, configuration))
-                    _outputSubject.OnNext("Created placeholder network file for LTO linking.");
-            }, "Placeholder network creation", critical: false);
-
-            // ALWAYS bypass the Makefile's network validation if we have networks
-            // This must happen BEFORE we invoke make, because the Makefile runs net validation immediately
-            if (Directory.GetFiles(sourceDir, "*.nnue").Any(f => new FileInfo(f).Length > 100_000))
-            {
-                ExecuteFileOperation(() =>
-                {
-                    if (BypassNetScriptIfNetworksPresent(downloadResult.RootDirectory))
-                        _outputSubject.OnNext("Bypassed Makefile network validation (networks already downloaded).");
-                }, "Makefile network bypass", critical: false);
-            }
-
             // Verify neural network files are in place and decide build strategy
             var canUsePGO = VerifyNetworkFilesForPGO(sourceDir);
             var usePgo = configuration.EnablePgo && canUsePGO;
@@ -309,6 +292,22 @@ if %errorlevel% == 0 (
         // Force shasum/sha256sum detection to be blank so Makefile skips validation on Windows
         process.StartInfo.ArgumentList.Add("shasum_command=");
 
+        // If we already have valid networks present, disable Makefile network download helpers
+        try
+        {
+            var hasValidNetwork = Directory.GetFiles(sourcePath, "*.nnue").Any(f => new FileInfo(f).Length >= 100_000);
+            if (hasValidNetwork)
+            {
+                process.StartInfo.ArgumentList.Add("curl=echo");
+                process.StartInfo.ArgumentList.Add("wget=echo");
+                _outputSubject.OnNext("Detected valid NNUE file(s); disabled Makefile network download (curl/wget -> echo).");
+            }
+        }
+        catch
+        {
+            // Ignore detection errors; make will handle downloads if needed
+        }
+
         // Legacy Stockfish Makefiles (<=14) don't consume EXTRAPROFILEFLAGS for profile-use; silence missing .gcda noise.
         if (legacyProfileLayout)
         {
@@ -500,63 +499,6 @@ if %errorlevel% == 0 (
             ? CompilerType.MinGW 
             : config.SelectedCompiler.Type;
     }
-    private static bool CreatePlaceholderNetwork(string sourceDirectory, BuildConfiguration config)
-    {
-        if (config.EnablePgo)
-            return false;
-
-        // If valid networks are already present, nothing to do.
-        if (Directory.GetFiles(sourceDirectory, "*.nnue").Any())
-            return false;
-
-        var targetNames = DetectNetworkNames(sourceDirectory);
-        if (targetNames.Count == 0)
-            targetNames.Add("nn-1c0000000000.nnue"); // fallback to classic default
-
-        var dummyData = new byte[1024];
-        dummyData[0] = 0x4E; // N
-        dummyData[1] = 0x4E; // N
-        dummyData[2] = 0x55; // U
-        dummyData[3] = 0x45; // E
-
-        var created = false;
-        foreach (var name in targetNames)
-        {
-            var path = Path.Combine(sourceDirectory, name);
-            if (!File.Exists(path))
-            {
-                File.WriteAllBytes(path, dummyData);
-                created = true;
-            }
-        }
-
-        return created;
-    }
-
-    private static List<string> DetectNetworkNames(string sourceDirectory)
-    {
-        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var candidates = new[]
-        {
-            Path.Combine(sourceDirectory, "evaluate.h"),
-            Path.Combine(sourceDirectory, "nnue", "evaluate.h")
-        };
-
-        var regex = new Regex("#define\\s+EvalFileDefaultName\\w*\\s+\"(nn-[a-z0-9]{12}\\.nnue)\"", RegexOptions.IgnoreCase);
-
-        foreach (var candidate in candidates)
-        {
-            if (!File.Exists(candidate)) continue;
-            var contents = File.ReadAllText(candidate);
-            foreach (Match m in regex.Matches(contents))
-            {
-                if (m.Success)
-                    names.Add(m.Groups[1].Value);
-            }
-        }
-
-        return names.ToList();
-    }
 
     private bool VerifyNetworkFilesForPGO(string sourceDirectory)
     {
@@ -615,114 +557,6 @@ if %errorlevel% == 0 (
         }
         if (Directory.Exists(tempDirectory))
             _outputSubject.OnNext($"Warning: {description} persists: {tempDirectory}");
-    }
-
-    private bool BypassNetScriptIfNetworksPresent(string? rootDirectory)
-    {
-        if (string.IsNullOrWhiteSpace(rootDirectory))
-            return false;
-
-        bool success = false;
-
-        // Method 1: Replace net.sh script to skip validation
-        var scriptPath = Path.Combine(rootDirectory, "scripts", "net.sh");
-        if (File.Exists(scriptPath))
-        {
-            try
-            {
-                var scriptContent = """
-#!/bin/sh
-echo "Networks already present; skipping net target."
-exit 0
-""";
-                File.WriteAllText(scriptPath, scriptContent.Replace("\r\n", "\n"));
-                _outputSubject.OnNext("Modified net.sh to skip network validation.");
-                success = true;
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to modify net.sh");
-            }
-        }
-
-        // Method 2: Disable the network verification in the Makefile
-        // We'll comment out just the failing sha256sum lines in the net target
-        var makefilePath = Path.Combine(rootDirectory, "src", "Makefile");
-        if (File.Exists(makefilePath))
-        {
-            try
-            {
-                var lines = File.ReadAllLines(makefilePath);
-                bool modified = false;
-                
-                for (int i = 0; i < lines.Length; i++)
-                {
-                    var line = lines[i];
-                    
-                    // Comment out lines that call sha256sum for validation
-                    // But ONLY if they're actual shell commands (contain sha256sum followed by options/files)
-                    if (line.Contains("sha256sum") && 
-                        (line.Contains("-c") || line.Contains("$(NNUE_FILE)")) &&
-                        !line.TrimStart().StartsWith("#") &&
-                        !line.Contains("eval"))
-                    {
-                        // Comment out while preserving leading whitespace (especially tabs) to avoid "missing separator"
-                        var match = Regex.Match(line, @"^(\s*)(.*)$");
-                        var prefix = match.Success ? match.Groups[1].Value : string.Empty;
-                        var rest = match.Success ? match.Groups[2].Value : line;
-                        lines[i] = $"{prefix}# {rest} # Commented out - validation done by C# downloader";
-                        modified = true;
-                        _logger.LogInformation("Commented out sha256sum line: {Line}", line.Trim());
-                    }
-                }
-
-                // Replace the entire 'net' target with a no-op when networks are already present,
-                // but only for newer Makefiles that define multiple EvalFileDefaultName variants.
-                // Older releases (e.g., SF 16) have a simpler net target; overriding it can trigger
-                // "missing separator" errors if tabs are lost. We therefore require the dual-net
-                // markers before replacing.
-                bool hasDualNetTarget = lines.Any(l => l.Contains("EvalFileDefaultNameBig", StringComparison.OrdinalIgnoreCase) ||
-                                                       l.Contains("EvalFileDefaultNameSmall", StringComparison.OrdinalIgnoreCase));
-                if (hasDualNetTarget)
-                {
-                    for (int i = 0; i < lines.Length; i++)
-                    {
-                        if (Regex.IsMatch(lines[i], @"^net:\s*$"))
-                        {
-                            var newLines = lines.Take(i).ToList();
-                            newLines.Add("net:");
-                            newLines.Add("\t@echo \"Networks already present; skipping net target.\"");
-                            newLines.Add("\t@true");
-
-                            // Skip existing net target body (indented with tabs)
-                            int j = i + 1;
-                            while (j < lines.Length && lines[j].StartsWith("\t"))
-                                j++;
-
-                            // Append the rest of the file
-                            newLines.AddRange(lines.Skip(j));
-                            lines = newLines.ToArray();
-                            modified = true;
-                            _outputSubject.OnNext("Overrode Makefile net target to a no-op (networks already present).");
-                            break;
-                        }
-                    }
-                }
-                
-                if (modified)
-                {
-                    File.WriteAllLines(makefilePath, lines);
-                    _outputSubject.OnNext("Disabled sha256sum validation in Makefile.");
-                    success = true;
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to modify Makefile");
-            }
-        }
-
-        return success;
     }
 
     private static int SanitizeParallelJobs(int jobs)
@@ -788,7 +622,13 @@ exit 0
         if (safeFilename.Any(c => invalidChars.Contains(c)))
             throw new SecurityException("Filename contains invalid characters");
 
+        // Additional filename validation
+        if (safeFilename.StartsWith('.') || safeFilename.Contains(".."))
+            throw new SecurityException("Filename contains suspicious patterns");
+
         var rootDir = Path.GetFullPath(outputDirectory);
+        
+        // Define allowed root directories
         var allowedRoots = new[]
         {
             Environment.GetFolderPath(Environment.SpecialFolder.Desktop),
@@ -796,9 +636,29 @@ exit 0
             Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
             Path.Combine(Path.GetTempPath(), "StockfishCompiler")
         }.Where(p => !string.IsNullOrWhiteSpace(p))
-         .Select(Path.GetFullPath)
+         .Select(NormalizePath)
          .ToList();
 
+        // Resolve symlinks and junctions to get real path
+        var finalPath = Path.Combine(rootDir, safeFilename);
+        string resolvedPath;
+        
+        try
+        {
+            resolvedPath = NormalizePath(Path.GetFullPath(finalPath));
+            
+            // On Windows, resolve junctions and symlinks
+            if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            {
+                resolvedPath = ResolveWindowsPath(resolvedPath);
+            }
+        }
+        catch (Exception ex)
+        {
+            throw new SecurityException($"Failed to resolve output path: {ex.Message}");
+        }
+
+        // Verify resolved path is under allowed roots
         bool IsUnderRoot(string path, string root)
         {
             var normalizedRoot = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
@@ -810,33 +670,108 @@ exit 0
                    path[normalizedRoot.Length] == Path.AltDirectorySeparatorChar;
         }
 
-        if (!allowedRoots.Any(r => IsUnderRoot(rootDir, r)))
+        if (!allowedRoots.Any(r => IsUnderRoot(resolvedPath, r)))
         {
+            // Check if it's a system directory (forbidden)
             var systemDirs = new[]
             {
                 Environment.GetFolderPath(Environment.SpecialFolder.System),
                 Environment.GetFolderPath(Environment.SpecialFolder.Windows),
                 Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
                 Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86)
-            }.Where(p => !string.IsNullOrWhiteSpace(p)).Select(Path.GetFullPath).ToList();
+            }.Where(p => !string.IsNullOrWhiteSpace(p))
+             .Select(NormalizePath)
+             .ToList();
 
-            if (systemDirs.Any(r => IsUnderRoot(rootDir, r)))
+            if (systemDirs.Any(r => IsUnderRoot(resolvedPath, r)))
                 throw new SecurityException("Output directory cannot be a system directory");
 
+            // For non-standard paths, verify we can actually write there
             try
             {
-                Directory.CreateDirectory(rootDir);
+                var testDir = Path.GetDirectoryName(resolvedPath);
+                if (!string.IsNullOrEmpty(testDir))
+                {
+                    Directory.CreateDirectory(testDir);
+                    
+                    // Test write permissions
+                    var testFile = Path.Combine(testDir, $".write_test_{Guid.NewGuid():N}");
+                    File.WriteAllText(testFile, "test");
+                    File.Delete(testFile);
+                }
+            }
+            catch (UnauthorizedAccessException)
+            {
+                throw new SecurityException("No write permission for output directory");
             }
             catch (Exception ex)
             {
                 throw new SecurityException($"Output directory is not accessible: {ex.Message}");
             }
 
-            return Path.Combine(rootDir, safeFilename);
+            // Path is accessible but not in allowed roots - this handles user-specified custom directories
+        }
+        else
+        {
+            // Standard allowed path - just ensure directory exists
+            Directory.CreateDirectory(Path.GetDirectoryName(resolvedPath) ?? rootDir);
         }
 
-        Directory.CreateDirectory(rootDir);
-        return Path.Combine(rootDir, safeFilename);
+        return finalPath;
+    }
+
+    /// <summary>
+    /// Normalizes path separators and removes trailing slashes.
+    /// </summary>
+    private static string NormalizePath(string path)
+    {
+        return Path.GetFullPath(path)
+            .TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+    }
+
+    /// <summary>
+    /// Resolves Windows junctions, symbolic links, and network paths to their real location.
+    /// </summary>
+    private static string ResolveWindowsPath(string path)
+    {
+        if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+            return path;
+
+        try
+        {
+            // Use DirectoryInfo to resolve junctions
+            if (Directory.Exists(path))
+            {
+                var dirInfo = new DirectoryInfo(path);
+                if (dirInfo.Attributes.HasFlag(FileAttributes.ReparsePoint))
+                {
+                    // This is a junction or symlink - get the target
+                    var target = dirInfo.LinkTarget;
+                    if (!string.IsNullOrEmpty(target))
+                    {
+                        return Path.GetFullPath(target);
+                    }
+                }
+            }
+            
+            // For files, check parent directory
+            var directory = Path.GetDirectoryName(path);
+            if (!string.IsNullOrEmpty(directory))
+            {
+                var resolvedDir = ResolveWindowsPath(directory);
+                if (resolvedDir != directory)
+                {
+                    return Path.Combine(resolvedDir, Path.GetFileName(path));
+                }
+            }
+        }
+        catch
+        {
+            // If resolution fails, return original path
+            // This is safer than throwing an exception
+        }
+
+        return path;
     }
 
     public void Dispose()
