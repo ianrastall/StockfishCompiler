@@ -14,7 +14,7 @@ using StockfishCompiler.Models;
 
 namespace StockfishCompiler.Services;
 
-public class BuildService(IStockfishDownloader downloader, ILogger<BuildService> logger) : IBuildService, IDisposable
+public partial class BuildService(IStockfishDownloader downloader, ILogger<BuildService> logger) : IBuildService, IDisposable
 {
     public IObservable<string> Output => _outputSubject.AsObservable();
     public IObservable<double> Progress => _progressSubject.AsObservable();
@@ -79,7 +79,8 @@ public class BuildService(IStockfishDownloader downloader, ILogger<BuildService>
             }
 
             // Verify neural network files are in place and decide build strategy
-            var canUsePGO = VerifyNetworkFilesForPGO(sourceDir);
+            var (canUsePGO, pgoMessage) = VerifyNetworkFilesForPGO(sourceDir);
+            _outputSubject.OnNext(pgoMessage);
             var usePgo = configuration.EnablePgo && canUsePGO;
 
             if (!usePgo)
@@ -226,7 +227,7 @@ if %errorlevel% == 0 (
             File.WriteAllText(wrapperBatPath, wrapperBatContent);
             
             // Prepend our wrapper directory to PATH so it's found first
-            var currentPath = env.ContainsKey("PATH") ? env["PATH"] : Environment.GetEnvironmentVariable("PATH") ?? "";
+            var currentPath = env.GetValueOrDefault("PATH", Environment.GetEnvironmentVariable("PATH") ?? "");
             env["PATH"] = $"{wrapperDir};{currentPath}";
             
             _outputSubject.OnNext("Created sha256sum wrapper to bypass validation issues (MSYS-friendly script + .bat fallback).");
@@ -363,29 +364,39 @@ if %errorlevel% == 0 (
         });
 
         var outputBuilder = new StringBuilder();
-        Task ReadAsync(StreamReader reader) => Task.Run(async () =>
+        static Task ReadAsync(StreamReader reader, StringBuilder outputBuilder, Action<StringBuilder, string> appendOutput, CancellationToken token) => Task.Run(async () =>
         {
             while (!reader.EndOfStream)
             {
                 token.ThrowIfCancellationRequested();
                 var line = await reader.ReadLineAsync();
                 if (line == null) break;
-                AppendOutput(outputBuilder, line);
+                appendOutput(outputBuilder, line);
             }
         }, token);
 
-        var readStdOut = ReadAsync(process.StandardOutput);
-        var readStdErr = ReadAsync(process.StandardError);
+        var readStdOut = ReadAsync(process.StandardOutput, outputBuilder, AppendOutput, token);
+        var readStdErr = ReadAsync(process.StandardError, outputBuilder, AppendOutput, token);
         var waitExit = process.WaitForExitAsync(token);
 
         try
         {
             await Task.WhenAll(readStdOut, readStdErr, waitExit);
 
+            var output = outputBuilder.ToString();
+            
+            // Log the result for debugging
+            if (process.ExitCode != 0)
+            {
+                _logger.LogError("Build failed with exit code {ExitCode}. Last output lines:\n{Output}", 
+                    process.ExitCode, 
+                    GetLastLines(output, 50));
+            }
+
             return new CompilationResult
             {
                 Success = process.ExitCode == 0,
-                Output = outputBuilder.ToString(),
+                Output = output,
                 ExitCode = process.ExitCode
             };
         }
@@ -519,14 +530,13 @@ if %errorlevel% == 0 (
             : config.SelectedCompiler.Type;
     }
 
-    private bool VerifyNetworkFilesForPGO(string sourceDirectory)
+    private static (bool Success, string Message) VerifyNetworkFilesForPGO(string sourceDirectory)
     {
         var nnueFiles = Directory.GetFiles(sourceDirectory, "*.nnue");
         
         if (nnueFiles.Length == 0)
         {
-            _outputSubject.OnNext("No neural network files found.");
-            return false;
+            return (false, "No neural network files found.");
         }
 
         // Check if we have at least one valid (non-tiny) network file
@@ -537,13 +547,11 @@ if %errorlevel% == 0 (
         
         if (validNetworks.Length > 0)
         {
-            _outputSubject.OnNext($"Valid network files for PGO: {string.Join(", ", validNetworks.Select(Path.GetFileName))}");
-            return true;
+            return (true, $"Valid network files for PGO: {string.Join(", ", validNetworks.Select(Path.GetFileName))}");
         }
         else
         {
-            _outputSubject.OnNext($"Network files present but too small (placeholders only): {string.Join(", ", nnueFiles.Select(Path.GetFileName))}");
-            return false;
+            return (false, $"Network files present but too small (placeholders only): {string.Join(", ", nnueFiles.Select(Path.GetFileName))}");
         }
     }
 
@@ -586,6 +594,16 @@ if %errorlevel% == 0 (
         return jobs;
     }
 
+    private static string GetLastLines(string text, int lineCount)
+    {
+        if (string.IsNullOrEmpty(text))
+            return "(empty)";
+            
+        var lines = text.Split('\n');
+        var startIndex = Math.Max(0, lines.Length - lineCount);
+        return string.Join('\n', lines.Skip(startIndex));
+    }
+
     private static string SanitizeArchitecture(string? arch)
     {
         if (string.IsNullOrWhiteSpace(arch)) return Architectures.X86_64;
@@ -608,6 +626,9 @@ if %errorlevel% == 0 (
         return validArchs.Contains(arch) ? arch : Architectures.X86_64;
     }
 
+    [GeneratedRegex(@"sf_(\d+)", RegexOptions.IgnoreCase)]
+    private static partial Regex VersionNumberRegex();
+
     private static int GetMajorVersionNumber(string? sourceVersion)
     {
         if (string.IsNullOrWhiteSpace(sourceVersion))
@@ -618,7 +639,7 @@ if %errorlevel% == 0 (
             sourceVersion.Equals("latest", StringComparison.OrdinalIgnoreCase))
             return 99;
 
-        var match = Regex.Match(sourceVersion, @"sf_(\d+)", RegexOptions.IgnoreCase);
+        var match = VersionNumberRegex().Match(sourceVersion);
         if (match.Success && int.TryParse(match.Groups[1].Value, out var major))
             return major;
 
@@ -677,7 +698,7 @@ if %errorlevel% == 0 (
             throw new SecurityException($"Failed to resolve output path: {ex.Message}");
         }
 
-        bool IsUnderRoot(string path, string root)
+        static bool IsUnderRoot(string path, string root)
         {
             var normalizedRoot = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
             if (!path.StartsWith(normalizedRoot, StringComparison.OrdinalIgnoreCase))
@@ -823,5 +844,7 @@ if %errorlevel% == 0 (
         
         _cts?.Dispose();
         _cts = null;
+        
+        GC.SuppressFinalize(this);
     }
 }

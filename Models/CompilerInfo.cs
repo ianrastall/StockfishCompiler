@@ -8,6 +8,12 @@ public class CompilerInfo
     public string Path { get; set; } = string.Empty;
     public string DisplayName { get; set; } = string.Empty;
     public bool IsAvailable { get; set; }
+    
+    /// <summary>
+    /// Contains the error message if the compiler failed validation (e.g., missing DLLs).
+    /// Null or empty if the compiler is valid and available.
+    /// </summary>
+    public string? ValidationError { get; set; }
 
     public override string ToString() => DisplayName;
 }

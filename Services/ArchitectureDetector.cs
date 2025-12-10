@@ -151,14 +151,20 @@ public class ArchitectureDetector : IArchitectureDetector
             _logger.LogWarning("GCC detection exited with code {ExitCode}", process.ExitCode);
             if (!string.IsNullOrWhiteSpace(stderr))
             {
-                _logger.LogDebug("GCC stderr: {StdErr}", stderr.Substring(0, Math.Min(500, stderr.Length)));
+                // Log full stderr at warning level to capture missing DLL errors
+                _logger.LogWarning("GCC stderr output: {StdErr}", stderr.Trim());
             }
         }
 
         // If there were errors and no output, throw to trigger fallback
         if (process.ExitCode != 0 && string.IsNullOrWhiteSpace(stdout))
         {
-            throw new InvalidOperationException($"GCC detection failed with exit code {process.ExitCode}");
+            var errorMessage = $"GCC detection failed with exit code {process.ExitCode}";
+            if (!string.IsNullOrWhiteSpace(stderr))
+            {
+                errorMessage += $". Error details: {stderr.Trim()}";
+            }
+            throw new InvalidOperationException(errorMessage);
         }
 
         var features = new List<string>();

@@ -144,7 +144,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
     private static string BuildNoCompilersFoundMessage()
     {
         var msg = "No C++ compilers were found on your system.\n\n";
-        msg += "Fastest fix: click \"Download & Install MSYS2 (GCC)\" above to grab everything automatically.\n\n";
+        msg += "Click \"MSYS2 Setup Guide\" above for installation instructions.\n\n";
         msg += "Searched locations:\n";
         msg += "  - MSYS2 (C:\\msys64, D:\\msys64, etc.)\n";
         msg += "  - Git for Windows MinGW\n";

@@ -4,9 +4,9 @@
         xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
         xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
         mc:Ignorable="d"
-        Title="Install C++ Compiler" 
-        Height="400" 
-        Width="600"
+        Title="C++ Compiler Required" 
+        Height="500" 
+        Width="650"
         WindowStartupLocation="CenterOwner"
         ResizeMode="NoResize"
         Background="{DynamicResource BackgroundBrush}">
@@ -20,7 +20,7 @@
         </Grid.RowDefinitions>
 
         <TextBlock Grid.Row="0" 
-                   Text="No C++ Compiler Found" 
+                   Text="C++ Compiler Required" 
                    FontSize="24" 
                    FontWeight="Bold" 
                    Foreground="{DynamicResource ForegroundBrush}"
@@ -29,61 +29,44 @@
         <TextBlock Grid.Row="1" 
                    TextWrapping="Wrap"
                    Foreground="{DynamicResource ForegroundMutedBrush}"
-                   Margin="0,0,0,20">
-            <Run Text="To compile Stockfish, you need a C++ compiler. "/>
-            <Run Text="We can automatically install MSYS2 with GCC for you."/>
+                   Margin="0,0,0,15">
+            <Run Text="To compile Stockfish, you need MSYS2 with a C++ compiler installed."/>
             <LineBreak/>
-            <LineBreak/>
-            <Run Text="This will:"/>
-            <LineBreak/>
-            <Run Text="- Download and install MSYS2 (~100 MB)"/>
-            <LineBreak/>
-            <Run Text="- Install the MinGW-w64 GCC compiler"/>
-            <LineBreak/>
-            <Run Text="- Configure everything automatically"/>
+            <Run Text="Click 'Show Instructions' to see the installation steps."/>
         </TextBlock>
 
         <ScrollViewer Grid.Row="2" 
                       VerticalScrollBarVisibility="Auto"
-                      Margin="0,0,0,20">
+                      Margin="0,0,0,15">
             <TextBox x:Name="LogTextBox"
                      Style="{StaticResource DarkTextBox}"
                      IsReadOnly="True"
                      FontFamily="Consolas"
+                     FontSize="12"
                      TextWrapping="Wrap"
-                     AcceptsReturn="True"/>
+                     AcceptsReturn="True"
+                     MinHeight="250"/>
         </ScrollViewer>
 
-        <Grid Grid.Row="3">
-            <Grid.ColumnDefinitions>
-                <ColumnDefinition Width="*"/>
-                <ColumnDefinition Width="Auto"/>
-                <ColumnDefinition Width="Auto"/>
-            </Grid.ColumnDefinitions>
-
-            <ProgressBar x:Name="InstallProgress"
-                         Grid.Column="0"
-                         Height="25"
-                         Margin="0,0,10,0"
-                         Style="{StaticResource DarkProgressBar}"
-                         Visibility="Collapsed"/>
-
+        <StackPanel Grid.Row="3" 
+                    Orientation="Horizontal" 
+                    HorizontalAlignment="Right">
             <Button x:Name="InstallButton"
-                    Grid.Column="1"
-                    Content="Install Compiler"
-                    Width="120"
-                    Height="30"
+                    Content="Show Instructions"
+                    MinWidth="140"
+                    Height="35"
+                    Padding="15,5"
                     Margin="0,0,10,0"
                     Style="{StaticResource DarkButton}"
                     Click="InstallButton_Click"/>
 
             <Button x:Name="CancelButton"
-                    Grid.Column="2"
-                    Content="Cancel"
-                    Width="80"
-                    Height="30"
+                    Content="Close"
+                    MinWidth="90"
+                    Height="35"
+                    Padding="15,5"
                     Style="{StaticResource DarkButton}"
                     Click="CancelButton_Click"/>
-        </Grid>
+        </StackPanel>
     </Grid>
 </Window>

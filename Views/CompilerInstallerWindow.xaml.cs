@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.Threading.Tasks;
 using System.Windows;
 using Microsoft.Extensions.DependencyInjection;
@@ -9,8 +10,6 @@ namespace StockfishCompiler.Views;
 public partial class CompilerInstallerWindow : Window
 {
     private readonly ICompilerInstallerService _installerService;
-    private CancellationTokenSource? _cts;
-    private bool _isInstalling;
 
     public bool CompilerInstalled { get; private set; }
     public string? InstalledPath { get; private set; }
@@ -23,12 +22,7 @@ public partial class CompilerInstallerWindow : Window
 
     private async void InstallButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_isInstalling) return;
-
-        _isInstalling = true;
-        _cts = new CancellationTokenSource();
         InstallButton.IsEnabled = false;
-        InstallProgress.Visibility = Visibility.Visible;
         LogTextBox.Clear();
 
         var progress = new Progress<string>(message =>
@@ -42,70 +36,62 @@ public partial class CompilerInstallerWindow : Window
 
         try
         {
-            var (success, installPath) = await _installerService.InstallMSYS2Async(progress, _cts.Token);
+            // Check if already installed
+            var (installed, existingPath) = await _installerService.IsMSYS2InstalledAsync();
 
-            if (success)
+            if (installed && !string.IsNullOrWhiteSpace(existingPath))
             {
                 CompilerInstalled = true;
-                InstalledPath = installPath;
+                InstalledPath = existingPath;
                 
                 DarkMessageBox.Show(
-                    "Compiler installed successfully!\n\n" +
-                    $"Location: {installPath}\n\n" +
+                    $"MSYS2 is already installed at:\n\n{existingPath}\n\n" +
                     "Click OK to continue with compiler detection.",
-                    "Installation Complete",
+                    "MSYS2 Found",
                     MessageBoxButton.OK,
                     MessageBoxImage.Information,
                     this);
                 
                 DialogResult = true;
+                return;
             }
-            else
+
+            // Show installation instructions in log
+            await _installerService.InstallMSYS2Async(progress);
+
+            // Offer to open the download page
+            var result = DarkMessageBox.Show(
+                "MSYS2 is not installed.\n\n" +
+                "Would you like to open the MSYS2 download page in your browser?\n\n" +
+                "After installing MSYS2 and the required packages, restart this application.",
+                "Install MSYS2",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Question,
+                this);
+
+            if (result == MessageBoxResult.Yes)
             {
-                DarkMessageBox.Show(
-                    "Compiler installation failed.\n\n" +
-                    "Please check the log for details or install MSYS2 manually.",
-                    "Installation Failed",
-                    MessageBoxButton.OK,
-                    MessageBoxImage.Error,
-                    this);
+                var url = _installerService.GetMSYS2DownloadUrl();
+                Process.Start(new ProcessStartInfo(url) { UseShellExecute = true });
             }
         }
         catch (Exception ex)
         {
             DarkMessageBox.Show(
-                $"An error occurred during installation:\n\n{ex.Message}",
-                "Installation Error",
+                $"An error occurred:\n\n{ex.Message}",
+                "Error",
                 MessageBoxButton.OK,
                 MessageBoxImage.Error,
                 this);
         }
         finally
         {
-            _isInstalling = false;
-            _cts?.Dispose();
-            _cts = null;
             InstallButton.IsEnabled = true;
-            InstallProgress.Visibility = Visibility.Collapsed;
         }
     }
 
     private void CancelButton_Click(object sender, RoutedEventArgs e)
     {
-        if (_isInstalling)
-        {
-            var result = DarkMessageBox.Show(
-                "Installation is in progress. Are you sure you want to cancel?",
-                "Cancel Installation",
-                MessageBoxButton.YesNo,
-                MessageBoxImage.Warning,
-                this);
-            
-            if (result != MessageBoxResult.Yes) return;
-
-            _cts?.Cancel();
-        }
-
         DialogResult = false;
     }
 }

@@ -12,13 +12,13 @@
                                 Style="{StaticResource DarkButton}" 
                                 HorizontalAlignment="Left"
                                 IsEnabled="{Binding IsDetectingCompilers, Converter={StaticResource InverseBooleanConverter}}"/>
-                        <Button Content="Download &amp; Install MSYS2 (GCC)"
+                        <Button Content="MSYS2 Setup Guide"
                                 Click="InstallCompiler_Click"
                                 Style="{StaticResource DarkButton}"
                                 HorizontalAlignment="Left"
                                 IsEnabled="{Binding IsDetectingCompilers, Converter={StaticResource InverseBooleanConverter}}"/>
                     </StackPanel>
-                    <TextBlock Text="If no compiler is found, use the installer to grab MSYS2 + GCC, then re-run detection."
+                    <TextBlock Text="If no compiler is found, click 'MSYS2 Setup Guide' for installation instructions."
                                Style="{StaticResource DescriptionText}"
                                Margin="0,5,0,0"/>
                     <TextBlock Text="Detecting compilers..." 

@@ -11,7 +11,7 @@ using StockfishCompiler.Models;
 
 namespace StockfishCompiler.Services;
 
-public class StockfishDownloader : IStockfishDownloader
+public partial class StockfishDownloader : IStockfishDownloader
 {
     private readonly HttpClient _httpClient;
     private const string GitHubApiUrl = "https://api.github.com/repos/official-stockfish/Stockfish/releases/latest";
@@ -23,10 +23,23 @@ public class StockfishDownloader : IStockfishDownloader
         "https://tests.stockfishchess.org/api/nn/{0}",
         "https://github.com/official-stockfish/networks/raw/master/{0}"
     ];
-    private static readonly Regex NetworkMacroRegex = new("#define\\s+EvalFileDefaultName\\w*\\s+\"(nn-[a-z0-9]{12}\\.nnue)\"", RegexOptions.IgnoreCase | RegexOptions.Compiled, TimeSpan.FromSeconds(1));
-    private static readonly Regex RelaxedNetworkNameRegex = new("nn-[a-z0-9]{6,}\\.nnue", RegexOptions.IgnoreCase | RegexOptions.Compiled, TimeSpan.FromSeconds(1));
-    private static readonly Regex NetworkFileNameRegex = new("nn-([a-f0-9]{12})\\.nnue", RegexOptions.IgnoreCase | RegexOptions.Compiled, TimeSpan.FromSeconds(1));
+    // Regex patterns for detecting NNUE network file names in source code
+    // Modern Stockfish (17+) uses EvalFileDefaultNameBig and EvalFileDefaultNameSmall
+    // Older versions used EvalFileDefaultName
+    [GeneratedRegex(@"#define\s+EvalFileDefaultName(?:Big|Small)?\s+""(nn-[a-f0-9]{12}\.nnue)""", RegexOptions.IgnoreCase, matchTimeoutMilliseconds: 1000)]
+    private static partial Regex NetworkMacroRegex();
+    
+    // Relaxed pattern to find any nn-*.nnue reference in the file
+    [GeneratedRegex(@"nn-[a-f0-9]{12}\.nnue", RegexOptions.IgnoreCase, matchTimeoutMilliseconds: 1000)]
+    private static partial Regex RelaxedNetworkNameRegex();
+    
+    // Pattern to extract hash prefix from network filename for validation
+    [GeneratedRegex(@"nn-([a-f0-9]{12})\.nnue", RegexOptions.IgnoreCase, matchTimeoutMilliseconds: 1000)]
+    private static partial Regex NetworkFileNameRegex();
     private const long MaxDownloadSize = 500L * 1024 * 1024; // 500 MB safety cap
+
+    [GeneratedRegex(@"sf_(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase)]
+    private static partial Regex VersionTagRegex();
 
     public StockfishDownloader(HttpClient httpClient)
     {
@@ -96,7 +109,7 @@ public class StockfishDownloader : IStockfishDownloader
                         continue;
 
                     // Parse version from tag (e.g., "sf_17", "sf_17.1", "sf_18")
-                    var versionMatch = Regex.Match(tagName, @"sf_(\d+(?:\.\d+)?)", RegexOptions.IgnoreCase);
+                    var versionMatch = VersionTagRegex().Match(tagName);
                     if (!versionMatch.Success)
                         continue;
 
@@ -122,13 +135,10 @@ public class StockfishDownloader : IStockfishDownloader
         }
 
         // Keep only versions we consider buildable (NNUE era and newer), plus master/stable aliases.
-        versions = versions
+        return [.. versions
             .Where(v => v.MajorVersion >= 12 || string.Equals(v.Id, "master", StringComparison.OrdinalIgnoreCase) || string.Equals(v.Id, "stable", StringComparison.OrdinalIgnoreCase))
             .OrderByDescending(v => v.MajorVersion)
-            .ThenByDescending(v => v.Id)
-            .ToList();
-
-        return versions;
+            .ThenByDescending(v => v.Id)];
     }
 
     private static StockfishVersionInfo ClassifyStockfishVersion(
@@ -327,7 +337,7 @@ public class StockfishDownloader : IStockfishDownloader
         return downloadResult;
     }
 
-    public async Task<bool> DownloadNeuralNetworkAsync(string sourceDirectory, BuildConfiguration? config = null, IProgress<string>? progress = null, CancellationToken cancellationToken = default)
+    public async Task<bool> DownloadNeuralNetworkAsync(string sourceDirectory, BuildConfiguration? _ = null, IProgress<string>? progress = null, CancellationToken cancellationToken = default)
     {
         progress?.Report("Preparing NNUE neural networks...");
 
@@ -464,27 +474,41 @@ public class StockfishDownloader : IStockfishDownloader
     private static List<string> DetectNetworkFileNames(string sourceDirectory)
     {
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var candidates = new[]
+        
+        // Search for network definitions in header files
+        var headerCandidates = new[]
         {
             Path.Combine(sourceDirectory, "evaluate.h"),
-            Path.Combine(sourceDirectory, "nnue", "evaluate.h")
+            Path.Combine(sourceDirectory, "nnue", "evaluate.h"),
+            Path.Combine(sourceDirectory, "ucioption.cpp"),
+            Path.Combine(sourceDirectory, "misc.h")
         };
 
-        foreach (var candidate in candidates)
+        foreach (var candidate in headerCandidates)
         {
             if (!File.Exists(candidate))
                 continue;
 
             var contents = File.ReadAllText(candidate);
-            foreach (Match match in NetworkMacroRegex.Matches(contents))
+            
+            // Try the macro pattern first
+            foreach (Match match in NetworkMacroRegex().Matches(contents))
             {
                 if (match.Success)
                     names.Add(match.Groups[1].Value);
             }
+        }
 
-            if (names.Count == 0)
+        // If no names found via macro, try the relaxed pattern on all candidate files
+        if (names.Count == 0)
+        {
+            foreach (var candidate in headerCandidates)
             {
-                foreach (Match match in RelaxedNetworkNameRegex.Matches(contents))
+                if (!File.Exists(candidate))
+                    continue;
+
+                var contents = File.ReadAllText(candidate);
+                foreach (Match match in RelaxedNetworkNameRegex().Matches(contents))
                 {
                     if (match.Success)
                         names.Add(match.Value);
@@ -492,24 +516,47 @@ public class StockfishDownloader : IStockfishDownloader
             }
         }
 
-        if (names.Count == 0)
+        // Also check the Makefile for EVALFILE definitions
+        var makefilePath = Path.Combine(sourceDirectory, "Makefile");
+        if (names.Count == 0 && File.Exists(makefilePath))
         {
-            // Fallback to any NNUE files already present anywhere in the source tree
-            foreach (var file in Directory.GetFiles(sourceDirectory, "*.nnue", SearchOption.AllDirectories))
+            try
             {
-                var name = Path.GetFileName(file);
-                if (!string.IsNullOrWhiteSpace(name))
-                    names.Add(name);
+                var makefileContents = File.ReadAllText(makefilePath);
+                
+                // Look for patterns like: EVALFILE = nn-xxxxxxxxxxxxx.nnue
+                // or: EvalFileDefaultNameBig := "nn-xxxxxxxxxxxxx.nnue"
+                foreach (Match match in RelaxedNetworkNameRegex().Matches(makefileContents))
+                {
+                    if (match.Success)
+                        names.Add(match.Value);
+                }
+            }
+            catch
+            {
+                // Ignore read errors
             }
         }
 
-        if (names.Count == 0 && File.Exists(Path.Combine(sourceDirectory, "Makefile")))
+        // Fallback to any NNUE files already present anywhere in the source tree
+        if (names.Count == 0)
         {
-            // Stockfish changes macro names occasionally; use the classic default as a last resort
-            names.Add("nn-1c0000000000.nnue");
+            try
+            {
+                foreach (var file in Directory.GetFiles(sourceDirectory, "*.nnue", SearchOption.AllDirectories))
+                {
+                    var name = Path.GetFileName(file);
+                    if (!string.IsNullOrWhiteSpace(name) && NetworkFileNameRegex().IsMatch(name))
+                        names.Add(name);
+                }
+            }
+            catch
+            {
+                // Ignore enumeration errors
+            }
         }
 
-        return names.ToList();
+        return [.. names];
     }
 
     private static async Task<bool> ValidateNetworkFileAsync(string filePath, string fileName, CancellationToken cancellationToken = default)
@@ -518,7 +565,7 @@ public class StockfishDownloader : IStockfishDownloader
         if (!info.Exists || info.Length < 1_000_000)
             return false;
 
-        var match = NetworkFileNameRegex.Match(fileName);
+        var match = NetworkFileNameRegex().Match(fileName);
         if (!match.Success)
             return true;
 
@@ -528,12 +575,6 @@ public class StockfishDownloader : IStockfishDownloader
         await using var stream = File.OpenRead(filePath);
         var hash = Convert.ToHexString(await sha256.ComputeHashAsync(stream, cancellationToken)).ToLowerInvariant();
         return hash.StartsWith(expectedPrefix, StringComparison.Ordinal);
-    }
-
-    private void EnsureUserAgent()
-    {
-        if (_httpClient.DefaultRequestHeaders.UserAgent.Count == 0)
-            _httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("StockfishCompiler/1.0");
     }
 
     private static async Task<bool> VerifyFileHashAsync(string filePath, string expectedSha256)

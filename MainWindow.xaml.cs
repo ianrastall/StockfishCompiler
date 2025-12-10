@@ -63,12 +63,38 @@ namespace StockfishCompiler
 
                 if (!string.IsNullOrWhiteSpace(output))
                 {
-                    Clipboard.SetText(output);
+                    // Retry clipboard operation a few times in case it's locked
+                    const int maxRetries = 3;
+                    Exception? lastException = null;
+                    
+                    for (int i = 0; i < maxRetries; i++)
+                    {
+                        try
+                        {
+                            Clipboard.SetDataObject(output, true);
+                            DarkMessageBox.Show(
+                                "Build output copied to clipboard.",
+                                "Copy Output",
+                                MessageBoxButton.OK,
+                                MessageBoxImage.Information,
+                                this
+                            );
+                            return;
+                        }
+                        catch (System.Runtime.InteropServices.COMException ex)
+                        {
+                            lastException = ex;
+                            // Wait a bit and retry - clipboard might be locked by another app
+                            System.Threading.Thread.Sleep(100);
+                        }
+                    }
+                    
+                    // If all retries failed, show error
                     DarkMessageBox.Show(
-                        "Build output copied to clipboard.",
+                        $"Failed to copy to clipboard. The clipboard may be in use by another application.\n\n{lastException?.Message}",
                         "Copy Output",
                         MessageBoxButton.OK,
-                        MessageBoxImage.Information,
+                        MessageBoxImage.Warning,
                         this
                     );
                 }

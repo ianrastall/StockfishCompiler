@@ -61,12 +61,15 @@ namespace StockfishCompiler
                     client.DefaultRequestHeaders.UserAgent.ParseAdd("StockfishCompiler/1.0");
                 });
 
+                // Register CompilerInstallerService (no longer needs HttpClient)
+                services.AddSingleton<ICompilerInstallerService, CompilerInstallerService>();
+
                 // Helpers
                 services.AddSingleton<ProcessExecutor>();
 
                 // Services
                 services.AddSingleton<ICompilerService, CompilerService>();
-                services.AddSingleton<ICompilerInstallerService, CompilerInstallerService>();
+                // Note: ICompilerInstallerService is registered above with AddHttpClient
                 services.AddSingleton<IArchitectureDetector, ArchitectureDetector>();
                 services.AddSingleton<IBuildService, BuildService>(); // Singleton to match BuildViewModel lifetime
                 services.AddSingleton<IUserSettingsService, UserSettingsService>();
@@ -136,7 +139,7 @@ namespace StockfishCompiler
             base.OnExit(e);
         }
 
-        private void DisposeServicesGracefully()
+        private static void DisposeServicesGracefully()
         {
             if (Services == null) return;
 
@@ -262,7 +265,7 @@ namespace StockfishCompiler
         {
             var patterns = new[] { "stockfish_build_*", "sf_prof_*" };
             var cutoff = DateTime.UtcNow - TimeSpan.FromHours(24);
-            var sentinelDir = Path.Combine(Path.GetTempPath(), $"sf_sentinel_{Process.GetCurrentProcess().Id}");
+            var sentinelDir = Path.Combine(Path.GetTempPath(), $"sf_sentinel_{Environment.ProcessId}");
 
             try
             {

@@ -1,10 +1,7 @@
 using System.Diagnostics;
 using System.IO;
-using System.Net.Http;
-using System.Security.Cryptography;
 using System.Linq;
 using System.Threading;
-using System.Text.Json;
 using Microsoft.Extensions.Logging;
 
 namespace StockfishCompiler.Services;
@@ -15,14 +12,12 @@ public interface ICompilerInstallerService
     Task<(bool Success, string InstallPath)> InstallMSYS2Async(IProgress<string>? progress = null, CancellationToken cancellationToken = default);
     Task<bool> InstallMSYS2PackagesAsync(string msys2Path, IProgress<string>? progress = null);
     Task<string> GetRecommendedInstallPathAsync();
+    string GetMSYS2DownloadUrl();
 }
 
-public class CompilerInstallerService(ILogger<CompilerInstallerService> logger, HttpClient httpClient) : ICompilerInstallerService
+public class CompilerInstallerService(ILogger<CompilerInstallerService> logger) : ICompilerInstallerService
 {
-    // Fallback to a known-good installer if latest lookup fails
-    private const string FALLBACK_INSTALLER_URL = "https://github.com/msys2/msys2-installer/releases/download/2024-01-13/msys2-x86_64-20240113.exe";
-    private const string FALLBACK_INSTALLER_SHA256 = "a24ca2f57c21c0f16d5d2e5e80f0ac94bdadad48f06cc11f06cb9e7526f18a66";
-    private const string LATEST_API = "https://api.github.com/repos/msys2/msys2-installer/releases/latest";
+    private const string MSYS2_DOWNLOAD_PAGE = "https://www.msys2.org/";
     private const string DEFAULT_INSTALL_PATH = @"C:\msys64";
     
     public Task<(bool Installed, string? Path)> IsMSYS2InstalledAsync()
@@ -69,220 +64,35 @@ public class CompilerInstallerService(ILogger<CompilerInstallerService> logger, 
         return Task.FromResult(DEFAULT_INSTALL_PATH);
     }
 
-    public async Task<(bool Success, string InstallPath)> InstallMSYS2Async(IProgress<string>? progress = null, CancellationToken cancellationToken = default)
+    public string GetMSYS2DownloadUrl() => MSYS2_DOWNLOAD_PAGE;
+
+    public Task<(bool Success, string InstallPath)> InstallMSYS2Async(IProgress<string>? progress = null, CancellationToken cancellationToken = default)
     {
-        try
+        // Check for existing installation first
+        var (installed, existingPath) = IsMSYS2InstalledAsync().Result;
+        
+        if (installed && !string.IsNullOrWhiteSpace(existingPath))
         {
-            progress?.Report("Checking for existing MSYS2 installation...");
-            
-            var (installed, existingPath) = await IsMSYS2InstalledAsync();
-            
-            if (installed && !string.IsNullOrWhiteSpace(existingPath))
-            {
-                logger.LogInformation("MSYS2 already installed at {Path}", existingPath);
-                progress?.Report($"MSYS2 is already installed at {existingPath}.");
-                return (true, existingPath);
-            }
-
-            var installPath = await GetRecommendedInstallPathAsync();
-            progress?.Report($"Installing MSYS2 to {installPath}...");
-
-            // Download the installer
-            var tempPath = Path.Combine(Path.GetTempPath(), "msys2-installer.exe");
-            
-            progress?.Report("Resolving latest MSYS2 installer...");
-            var (installerUrl, expectedHash) = await GetLatestInstallerAsync(cancellationToken);
-
-            progress?.Report("Downloading MSYS2 installer...");
-            logger.LogInformation("Downloading MSYS2 from {Url}", installerUrl);
-
-            using (var response = await httpClient.GetAsync(installerUrl, HttpCompletionOption.ResponseHeadersRead, cancellationToken))
-            {
-                response.EnsureSuccessStatusCode();
-                using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-                using var fileStream = new FileStream(tempPath, FileMode.Create, FileAccess.Write, FileShare.None);
-                
-                await stream.CopyToAsync(fileStream, cancellationToken);
-            }
-
-            // Verify SHA256 checksum for security
-            if (!string.IsNullOrWhiteSpace(expectedHash))
-            {
-                progress?.Report("Verifying installer integrity...");
-                logger.LogInformation("Verifying SHA256 checksum of downloaded installer");
-                
-                if (!await VerifyFileHashAsync(tempPath, expectedHash))
-                {
-                    logger.LogError("MSYS2 installer hash mismatch! Expected: {Expected}", expectedHash);
-                    progress?.Report("ERROR: Installer integrity check failed! The downloaded file may be corrupted or tampered with.");
-                    
-                    try { File.Delete(tempPath); } catch { }
-                    return (false, string.Empty);
-                }
-                
-                logger.LogInformation("Installer checksum verified successfully");
-                progress?.Report("Installer verified. Starting installation...");
-            }
-            else
-            {
-                logger.LogWarning("Skipping checksum verification because no hash was available for the installer");
-                progress?.Report("Installer downloaded (checksum unavailable). Proceeding with installation...");
-            }
-
-            // Run the installer silently
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = tempPath,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true
-            };
-
-            startInfo.ArgumentList.Add("install");
-            startInfo.ArgumentList.Add("--root");
-            startInfo.ArgumentList.Add(installPath);
-            startInfo.ArgumentList.Add("--confirm-command");
-
-            using var process = Process.Start(startInfo);
-            if (process == null)
-            {
-                logger.LogError("Failed to start MSYS2 installer");
-                return (false, string.Empty);
-            }
-
-            // Add timeout to prevent indefinite hangs
-            using var timeoutCts = new CancellationTokenSource(TimeSpan.FromMinutes(30));
-            using var linkedCts = CancellationTokenSource.CreateLinkedTokenSource(timeoutCts.Token, cancellationToken);
-            try
-            {
-                await process.WaitForExitAsync(linkedCts.Token);
-            }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-            {
-                logger.LogWarning("MSYS2 installation cancelled by user");
-                progress?.Report("Installation cancelled.");
-                try { process.Kill(true); } catch { }
-                return (false, string.Empty);
-            }
-            catch (OperationCanceledException)
-            {
-                logger.LogError("MSYS2 installation timed out after 30 minutes");
-                progress?.Report("Installation timed out. Please try installing MSYS2 manually.");
-                try { process.Kill(true); } catch { }
-                return (false, string.Empty);
-            }
-
-            if (process.ExitCode != 0)
-            {
-                logger.LogError("MSYS2 installation failed with exit code {ExitCode}", process.ExitCode);
-                progress?.Report("Installation failed. Please try installing MSYS2 manually.");
-                return (false, string.Empty);
-            }
-
-            // Clean up temp file
-            try { File.Delete(tempPath); } catch { }
-
-            progress?.Report("MSYS2 installed successfully!");
-            
-            // Install required packages
-            progress?.Report("Installing C++ compilers...");
-            await InstallMSYS2PackagesAsync(installPath, progress);
-
-            return (true, installPath);
+            logger.LogInformation("MSYS2 already installed at {Path}", existingPath);
+            progress?.Report($"MSYS2 is already installed at {existingPath}.");
+            return Task.FromResult((true, existingPath));
         }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "Failed to install MSYS2");
-            progress?.Report($"Installation error: {ex.Message}");
-            return (false, string.Empty);
-        }
-    }
 
-    private async Task<(string Url, string? Sha256)> GetLatestInstallerAsync(CancellationToken cancellationToken)
-    {
-        try
-        {
-            using var response = await httpClient.GetAsync(LATEST_API, HttpCompletionOption.ResponseHeadersRead, cancellationToken);
-            response.EnsureSuccessStatusCode();
-            await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
-            using var doc = await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
-
-            if (!doc.RootElement.TryGetProperty("assets", out var assetsElement) || assetsElement.ValueKind != JsonValueKind.Array)
-                return (FALLBACK_INSTALLER_URL, FALLBACK_INSTALLER_SHA256);
-
-            var assets = assetsElement.EnumerateArray().ToArray();
-            var installer = assets.FirstOrDefault(a =>
-                a.TryGetProperty("name", out var nameProp) &&
-                nameProp.GetString()?.EndsWith(".exe", StringComparison.OrdinalIgnoreCase) == true &&
-                nameProp.GetString()?.Contains("msys2-x86_64", StringComparison.OrdinalIgnoreCase) == true);
-
-            if (installer.ValueKind == JsonValueKind.Undefined)
-                return (FALLBACK_INSTALLER_URL, FALLBACK_INSTALLER_SHA256);
-
-            var url = installer.GetProperty("browser_download_url").GetString() ?? FALLBACK_INSTALLER_URL;
-
-            // Try to find a matching .sha256 asset to verify integrity
-            string? hash = null;
-            var installerName = installer.GetProperty("name").GetString();
-            var hashAsset = assets.FirstOrDefault(a =>
-                a.TryGetProperty("name", out var nameProp) &&
-                nameProp.GetString()?.EndsWith(".sha256", StringComparison.OrdinalIgnoreCase) == true &&
-                (installerName == null || nameProp.GetString()?.Contains(Path.GetFileNameWithoutExtension(installerName) ?? string.Empty, StringComparison.OrdinalIgnoreCase) == true));
-
-            if (hashAsset.ValueKind != JsonValueKind.Undefined)
-            {
-                var hashUrl = hashAsset.GetProperty("browser_download_url").GetString();
-                if (!string.IsNullOrEmpty(hashUrl))
-                {
-                    var hashContent = await httpClient.GetStringAsync(hashUrl, cancellationToken);
-                    hash = ParseSha256FromFile(hashContent);
-                }
-            }
-
-            return (url, string.IsNullOrWhiteSpace(hash) ? FALLBACK_INSTALLER_SHA256 : hash);
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Falling back to pinned MSYS2 installer");
-            return (FALLBACK_INSTALLER_URL, FALLBACK_INSTALLER_SHA256);
-        }
-    }
-
-    private static string? ParseSha256FromFile(string shaFileContents)
-    {
-        if (string.IsNullOrWhiteSpace(shaFileContents))
-            return null;
-
-        var firstLine = shaFileContents.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
-        if (string.IsNullOrWhiteSpace(firstLine))
-            return null;
-
-        // Typical format: "<hash> *msys2-x86_64-YYYYMMDD.exe"
-        var parts = firstLine.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-        var candidate = parts.Length > 0 ? parts[0] : null;
-        if (candidate != null && candidate.Length == 64 && candidate.All(c => Uri.IsHexDigit(c)))
-            return candidate.ToLowerInvariant();
-
-        return null;
-    }
-
-    private static async Task<bool> VerifyFileHashAsync(string filePath, string expectedHash)
-    {
-        try
-        {
-            using var sha256 = SHA256.Create();
-            using var stream = File.OpenRead(filePath);
-            var hashBytes = await sha256.ComputeHashAsync(stream);
-            var actualHash = Convert.ToHexString(hashBytes).ToLowerInvariant();
-            var expected = expectedHash.ToLowerInvariant();
-            
-            return actualHash == expected;
-        }
-        catch (Exception)
-        {
-            return false;
-        }
+        // Guide user to manual installation
+        logger.LogInformation("MSYS2 not found. User needs to install manually from {Url}", MSYS2_DOWNLOAD_PAGE);
+        progress?.Report("MSYS2 is not installed.");
+        progress?.Report($"Please download and install MSYS2 from: {MSYS2_DOWNLOAD_PAGE}");
+        progress?.Report("");
+        progress?.Report("Installation steps:");
+        progress?.Report("1. Download the installer from the MSYS2 website");
+        progress?.Report("2. Run the installer and follow the prompts");
+        progress?.Report("3. After installation, open 'MSYS2 MINGW64' from the Start menu");
+        progress?.Report("4. Run: pacman -Syu");
+        progress?.Report("5. Close and reopen 'MSYS2 MINGW64'");
+        progress?.Report("6. Run: pacman -S mingw-w64-x86_64-gcc mingw-w64-x86_64-make");
+        progress?.Report("7. Restart this application to detect the compiler");
+        
+        return Task.FromResult((false, string.Empty));
     }
 
     public async Task<bool> InstallMSYS2PackagesAsync(string msys2Path, IProgress<string>? progress = null)
